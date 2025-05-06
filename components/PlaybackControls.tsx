@@ -37,6 +37,14 @@ export function PlaybackControls({
   // 创建本地状态跟踪滑块值
   const [sliderValue, setSliderValue] = useState<number>(playbackRate * 10);
   
+  // 创建本地播放状态，确保UI正确显示
+  const [localIsPlaying, setLocalIsPlaying] = useState<boolean>(isPlaying);
+  
+  // 同步外部isPlaying到本地状态
+  useEffect(() => {
+    setLocalIsPlaying(isPlaying);
+  }, [isPlaying]);
+  
   // 同步外部playbackRate到本地状态
   useEffect(() => {
     setSliderValue(playbackRate * 10);
@@ -52,6 +60,14 @@ export function PlaybackControls({
     
     // 通知父组件更新速率
     onPlaybackRateChange(newRate);
+  };
+  
+  // 处理播放/暂停按钮点击
+  const handleTogglePlay = () => {
+    // 立即更新本地状态，确保UI快速响应
+    setLocalIsPlaying(!localIsPlaying);
+    // 调用父组件的切换方法
+    onTogglePlay();
   };
   
   // 处理进度条变化
@@ -95,10 +111,10 @@ export function PlaybackControls({
               <TooltipTrigger asChild>
                 <Button
                   size="icon"
-                  onClick={onTogglePlay}
+                  onClick={handleTogglePlay}
                   disabled={totalCount === 0 || isLoading}
                   className={`bg-gradient-to-r ${
-                    isPlaying
+                    localIsPlaying
                       ? "from-red-500 to-orange-500 hover:from-red-600 hover:to-orange-600"
                       : "from-blue-600 to-cyan-500 hover:from-blue-700 hover:to-cyan-600"
                   } text-white relative`}
@@ -108,12 +124,12 @@ export function PlaybackControls({
                       <div className="animate-spin h-4 w-4 border-2 border-white rounded-full border-t-transparent"></div>
                     </div>
                   ) : (
-                    isPlaying ? <Pause className="h-4 w-4" /> : <Play className="h-4 w-4" />
+                    localIsPlaying ? <Pause className="h-4 w-4" /> : <Play className="h-4 w-4" />
                   )}
                 </Button>
               </TooltipTrigger>
               <TooltipContent>
-                <p>{isPlaying ? "暂停" : "播放"}</p>
+                <p>{localIsPlaying ? "暂停" : "播放"}</p>
               </TooltipContent>
             </Tooltip>
           </TooltipProvider>

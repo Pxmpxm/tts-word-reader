@@ -117,8 +117,8 @@ const TTSReader = () => {
   const handleFileUpload = async (selectedFile: File) => {
     if (!mounted || !mammothLoaded || !mammothRef.current) return
 
-    setFile(selectedFile)
-    setIsLoading(true)
+      setFile(selectedFile)
+      setIsLoading(true)
     
     // 重置播放状态
     setIsPlaying(false)
@@ -129,31 +129,31 @@ const TTSReader = () => {
       audioRef.current = null
     }
 
-    try {
-      // 使用mammoth.js解析Word文档
-      const arrayBuffer = await selectedFile.arrayBuffer()
-      const result = await mammothRef.current.convertToHtml({ arrayBuffer })
+      try {
+        // 使用mammoth.js解析Word文档
+        const arrayBuffer = await selectedFile.arrayBuffer()
+        const result = await mammothRef.current.convertToHtml({ arrayBuffer })
 
-      // 获取HTML内容
-      const html = result.value
-      setDocumentHtml(html)
+        // 获取HTML内容
+        const html = result.value
+        setDocumentHtml(html)
 
-      // 将文档分割成句子以便朗读
-      const sentenceArray = extractSentencesFromHtml(html)
+        // 将文档分割成句子以便朗读
+        const sentenceArray = extractSentencesFromHtml(html)
       
       // 保存句子数组
-      setSentences(sentenceArray)
+        setSentences(sentenceArray)
 
-      // 重置当前朗读位置到第一句
-      setCurrentSentenceIndex(0)
+        // 重置当前朗读位置到第一句
+        setCurrentSentenceIndex(0)
       currentIndexRef.current = 0 // 同时更新ref
-    } catch (error) {
-      console.error("解析Word文档时出错:", error)
-      alert("解析文档失败，请检查文件格式。")
-    } finally {
-      setIsLoading(false)
+      } catch (error) {
+        console.error("解析Word文档时出错:", error)
+        alert("解析文档失败，请检查文件格式。")
+      } finally {
+        setIsLoading(false)
+      }
     }
-  }
 
   // 当文档加载或当前句子索引变化时，更新高亮显示
   useEffect(() => {
@@ -171,11 +171,11 @@ const TTSReader = () => {
       return
     }
 
-    const currentSentence = sentences[currentSentenceIndex]
-    if (!currentSentence) {
-      setHighlightedHtml(documentHtml)
-      return
-    }
+      const currentSentence = sentences[currentSentenceIndex]
+      if (!currentSentence) {
+        setHighlightedHtml(documentHtml)
+        return
+      }
 
     // 高亮当前句子
     const highlightedContent = highlightSentenceInHtml(
@@ -324,6 +324,11 @@ const TTSReader = () => {
       return false;
     }
     
+    // 强制播放时，确保播放状态为true
+    if (forcePlay && !isPlaying) {
+      setIsPlaying(true);
+    }
+    
     // 使用ref中的索引确保获取最新值
     const sentenceIndex = currentIndexRef.current;
     
@@ -341,6 +346,11 @@ const TTSReader = () => {
         const nextIndex = sentenceIndex + 1;
         setCurrentSentenceIndex(nextIndex);
         currentIndexRef.current = nextIndex; // 同时更新ref
+        
+        // 确保播放状态正确
+        if (!isPlaying) {
+          setIsPlaying(true);
+        }
         
         // 延迟播放下一句
         setTimeout(() => {
@@ -453,6 +463,11 @@ const TTSReader = () => {
             // 确保使用最新的速率设置
             syncPlaybackRateFromLocalStorage();
             
+            // 确保播放状态正确
+            if (!isPlaying) {
+              setIsPlaying(true);
+            }
+            
             // 延迟播放下一句
             setTimeout(() => {
               playCurrentSentence(true);
@@ -479,6 +494,11 @@ const TTSReader = () => {
             
             // 确保使用最新的速率设置
             syncPlaybackRateFromLocalStorage();
+            
+            // 确保播放状态正确
+            if (!isPlaying) {
+              setIsPlaying(true);
+            }
             
             // 延迟播放下一句
             setTimeout(() => {
@@ -563,24 +583,24 @@ const TTSReader = () => {
                 <TabsContent value="settings" className="px-6">
                   <div className="mt-4 space-y-4 h-[calc(100vh-350px)] overflow-y-auto bg-white dark:bg-gray-900 p-4 rounded-md shadow-inner">
                     <div className="space-y-4">
-                      <div className="space-y-2">
-                        <label className="text-sm font-medium">TTS API 端点</label>
-                        <input
-                          type="text"
-                          className="w-full p-2 border rounded-md text-sm bg-gray-50 dark:bg-gray-800"
-                          placeholder="https://your-tts-api.com/synthesize"
+                    <div className="space-y-2">
+                      <label className="text-sm font-medium">TTS API 端点</label>
+                      <input
+                        type="text"
+                        className="w-full p-2 border rounded-md text-sm bg-gray-50 dark:bg-gray-800"
+                        placeholder="https://your-tts-api.com/synthesize"
                           value={apiEndpoint}
                           onChange={handleApiEndpointChange}
-                        />
+                      />
                         <p className="text-xs text-muted-foreground mt-1">设置将自动保存</p>
-                      </div>
-                      
-                      <div className="space-y-2">
+                    </div>
+
+                    <div className="space-y-2">
                         <label className="text-sm font-medium">TTS API 高级设置</label>
                         <p className="text-xs text-muted-foreground">
                           在这里可以添加更多高级设置选项，如语速、音量等控制。
                         </p>
-                      </div>
+                    </div>
                     </div>
                   </div>
                 </TabsContent>
