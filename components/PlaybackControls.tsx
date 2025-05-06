@@ -2,7 +2,7 @@ import { Button } from "@/components/ui/button";
 import { Slider } from "@/components/ui/slider";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { Play, Pause, SkipBack, SkipForward, Gauge } from "lucide-react";
-import { savePlaybackRate } from "@/lib/playbackController";
+import { useEffect, useState } from "react";
 
 interface PlaybackControlsProps {
   isPlaying: boolean;
@@ -34,13 +34,23 @@ export function PlaybackControls({
   onProgressChange
 }: PlaybackControlsProps) {
   
+  // 创建本地状态跟踪滑块值
+  const [sliderValue, setSliderValue] = useState<number>(playbackRate * 10);
+  
+  // 同步外部playbackRate到本地状态
+  useEffect(() => {
+    setSliderValue(playbackRate * 10);
+  }, [playbackRate]);
+  
   // 处理播放速率变化
   const handlePlaybackRateChange = (value: number[]) => {
+    // 更新本地滑块状态
+    setSliderValue(value[0]);
+    
     // 转换为小数并保留一位小数
     const newRate = parseFloat((value[0] / 10).toFixed(1));
     
-    // 保存到localStorage并更新状态
-    savePlaybackRate(newRate);
+    // 通知父组件更新速率
     onPlaybackRateChange(newRate);
   };
   
@@ -133,7 +143,7 @@ export function PlaybackControls({
           <div className="flex items-center gap-2 flex-1">
             <Gauge className="h-4 w-4 text-muted-foreground flex-shrink-0" />
             <Slider 
-              value={[playbackRate * 10]} 
+              value={[sliderValue]} 
               min={5} 
               max={20} 
               step={1} 

@@ -13,12 +13,6 @@ export async function generateSpeech(text: string, voice: string, apiEndpoint: s
     throw new Error('TTS API只能在客户端环境调用');
   }
   
-  console.log("发送TTS请求:", { 
-    endpoint: apiEndpoint,
-    voice: voice,
-    textLength: text.length
-  });
-  
   const response = await fetch(apiEndpoint, {
     method: 'POST',
     headers: {
@@ -39,7 +33,6 @@ export async function generateSpeech(text: string, voice: string, apiEndpoint: s
   
   // 解析响应
   const data = await response.json() as TTSResponse;
-  console.log("TTS API响应:", data);
   
   if (!data.success || !data.data || !data.data.audio) {
     throw new Error('获取音频URL失败');
@@ -65,11 +58,22 @@ export function createAudioElement(audioUrl: string, playbackRate: number): HTML
     throw new Error('Audio相关功能只能在客户端环境使用');
   }
   
+  // 从localStorage获取最新的播放速率（如果有）
+  let currentRate = playbackRate;
+  try {
+    const savedRate = localStorage.getItem('ttsPlaybackRate');
+    if (savedRate) {
+      currentRate = parseFloat(parseFloat(savedRate).toFixed(1));
+    }
+  } catch (error) {
+    console.error("读取播放速率设置失败:", error);
+  }
+  
   const audio = new Audio(audioUrl);
   
   // 应用音频设置 (音量固定为100%)
   audio.volume = 1.0;
-  audio.playbackRate = playbackRate;
+  audio.playbackRate = currentRate;
   
   return audio;
 } 

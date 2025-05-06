@@ -50,6 +50,23 @@ const TTSReader = () => {
     currentIndexRef.current = currentSentenceIndex;
   }, [currentSentenceIndex]);
 
+  // 监听playbackRate的变化，实时应用到当前音频
+  useEffect(() => {
+    // 将播放速率保存到localStorage
+    if (mounted && typeof window !== 'undefined') {
+      try {
+        localStorage.setItem('ttsPlaybackRate', playbackRate.toString());
+      } catch (error) {
+        console.error("保存播放速率失败:", error);
+      }
+    }
+    
+    // 应用到当前音频
+    if (audioRef.current) {
+      audioRef.current.playbackRate = playbackRate;
+    }
+  }, [playbackRate, mounted]);
+
   // 客户端初始化
   useEffect(() => {
     setMounted(true)
@@ -192,6 +209,8 @@ const TTSReader = () => {
     setIsPlaying(newPlayingState);
     
     if (newPlayingState) {
+      // 确保使用最新的速率设置
+      syncPlaybackRateFromLocalStorage();
       // 如果切换到播放状态，使用playback机制播放当前句子
       playCurrentSentence(true);
     } else {
@@ -217,6 +236,9 @@ const TTSReader = () => {
       setCurrentSentenceIndex(newIndex);
       currentIndexRef.current = newIndex; // 同时更新ref
       
+      // 确保使用最新的速率设置
+      syncPlaybackRateFromLocalStorage();
+      
       // 延迟后播放
       setTimeout(() => {
         playCurrentSentence(true);
@@ -239,6 +261,9 @@ const TTSReader = () => {
       setCurrentSentenceIndex(newIndex);
       currentIndexRef.current = newIndex; // 同时更新ref
       
+      // 确保使用最新的速率设置
+      syncPlaybackRateFromLocalStorage();
+      
       // 延迟后播放
       setTimeout(() => {
         playCurrentSentence(true);
@@ -257,6 +282,9 @@ const TTSReader = () => {
     setCurrentSentenceIndex(newIndex);
     currentIndexRef.current = newIndex; // 同时更新ref
     
+    // 确保使用最新的速率设置
+    syncPlaybackRateFromLocalStorage();
+    
     // 如果正在播放，则在新位置继续播放
     if (isPlaying) {
       setTimeout(() => {
@@ -265,8 +293,28 @@ const TTSReader = () => {
     }
   };
   
+  // 从localStorage同步播放速率
+  const syncPlaybackRateFromLocalStorage = () => {
+    if (typeof window !== 'undefined') {
+      try {
+        const savedRate = localStorage.getItem('ttsPlaybackRate');
+        if (savedRate) {
+          const newRate = parseFloat(parseFloat(savedRate).toFixed(1));
+          if (newRate !== playbackRate) {
+            setPlaybackRate(newRate);
+          }
+        }
+      } catch (error) {
+        console.error("读取播放速率设置失败:", error);
+      }
+    }
+  };
+  
   // 播放当前句子
   const playCurrentSentence = async (forcePlay: boolean = false) => {
+    // 确保使用最新的速率设置
+    syncPlaybackRateFromLocalStorage();
+    
     // 如果没有句子或已暂停状态且没有强制播放，则返回
     if (sentences.length === 0) {
       return false;
@@ -351,9 +399,23 @@ const TTSReader = () => {
       const audio = new Audio(audioUrl);
       audioRef.current = audio;
       
+      // 从state直接获取当前的播放速率值
       // 设置音频参数
       audio.volume = 1.0; // 音量固定为100%
-      audio.playbackRate = playbackRate;
+      
+      // 确保使用正确的播放速率
+      try {
+        const savedRate = localStorage.getItem('ttsPlaybackRate');
+        if (savedRate) {
+          const storedRate = parseFloat(parseFloat(savedRate).toFixed(1));
+          audio.playbackRate = storedRate;
+        } else {
+          audio.playbackRate = playbackRate;
+        }
+      } catch (error) {
+        audio.playbackRate = playbackRate;
+        console.error("读取播放速率设置失败, 使用当前状态:", playbackRate, error);
+      }
       
       // 保存当前处理的索引，避免闭包问题
       const currentPlayingIndex = sentenceIndex;
@@ -362,8 +424,19 @@ const TTSReader = () => {
       audio.onloadeddata = () => {
         setIsAudioLoading(false);
         
-        // 加载完成后再次应用播放速率
-        audio.playbackRate = playbackRate;
+        // 加载完成后再次确认播放速率，确保设置生效
+        try {
+          const savedRate = localStorage.getItem('ttsPlaybackRate');
+          if (savedRate) {
+            const storedRate = parseFloat(parseFloat(savedRate).toFixed(1));
+            audio.playbackRate = storedRate;
+          } else {
+            audio.playbackRate = playbackRate;
+          }
+        } catch (error) {
+          audio.playbackRate = playbackRate;
+          console.error("音频加载完成，读取播放速率设置失败, 使用当前状态:", playbackRate, error);
+        }
       };
       
       // 播放完成事件
@@ -376,6 +449,9 @@ const TTSReader = () => {
             const nextIndex = currentPlayingIndex + 1;
             setCurrentSentenceIndex(nextIndex);
             currentIndexRef.current = nextIndex; // 同时更新ref
+            
+            // 确保使用最新的速率设置
+            syncPlaybackRateFromLocalStorage();
             
             // 延迟播放下一句
             setTimeout(() => {
@@ -400,6 +476,9 @@ const TTSReader = () => {
             const nextIndex = currentPlayingIndex + 1;
             setCurrentSentenceIndex(nextIndex);
             currentIndexRef.current = nextIndex; // 同时更新ref
+            
+            // 确保使用最新的速率设置
+            syncPlaybackRateFromLocalStorage();
             
             // 延迟播放下一句
             setTimeout(() => {
