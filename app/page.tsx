@@ -7,6 +7,8 @@ import { FileUploader } from "@/components/FileUploader"
 import { DocumentViewer } from "@/components/DocumentViewer"
 import { PlaybackControls } from "@/components/PlaybackControls"
 import { SettingsPanel } from "@/components/SettingsPanel"
+import { ThemeToggle } from "@/components/ui/theme-toggle"
+import { ScrollArea } from "@/components/ui/scroll-area"
 
 import { extractSentencesFromHtml, highlightSentenceInHtml } from "@/lib/textProcessor"
 import { loadPlaybackRate } from "@/lib/playbackController"
@@ -688,45 +690,73 @@ const TTSReader = () => {
   }
 
   return (
-    <div className="min-h-screen bg-gradient-to-b from-gray-50 to-gray-100 dark:from-gray-900 dark:to-gray-950 py-4">
-      <div className="container mx-auto px-4">
-        <header className="flex justify-between items-center mb-2">
-          <h1 className="text-3xl font-bold bg-gradient-to-r from-blue-600 to-cyan-500 bg-clip-text text-transparent">
+    <div className="h-screen bg-gradient-to-b from-gray-50 to-gray-100 dark:from-gray-900 dark:to-gray-950 py-3 sm:py-4 md:py-6 lg:py-8 overflow-hidden">
+      <div className="container mx-auto px-2 sm:px-4 md:px-6 h-full flex flex-col">
+        <header className="flex justify-between items-center mb-2 md:mb-4 lg:mb-6">
+          <h1 className="text-xl sm:text-2xl md:text-3xl font-bold bg-gradient-to-r from-blue-600 to-cyan-500 bg-clip-text text-transparent">
             文档朗读系统
           </h1>
+          <ThemeToggle />
         </header>
 
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+        {/* 移动端布局：使用纵向排列 */}
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-2 sm:gap-3 md:gap-5 lg:gap-8 flex-grow overflow-hidden">
           {/* 左侧面板：上传和设置 */}
-          <div className="space-y-6">
-            {/* 文件上传组件 */}
-            <FileUploader 
-              isLoading={isLoading} 
-              mammothLoaded={mammothLoaded} 
-              onFileUpload={handleFileUpload} 
-            />
+          <div className="flex flex-col overflow-hidden">
+            <div className="md:hidden flex space-x-2">
+              <div className="w-1/2">
+                {/* 文件上传组件 - 移动端 */}
+                <FileUploader 
+                  isLoading={isLoading} 
+                  mammothLoaded={mammothLoaded} 
+                  onFileUpload={handleFileUpload} 
+                />
+              </div>
+              <div className="w-1/2">
+                {/* 设置组件 - 移动端 */}
+                <SettingsPanel 
+                  voices={AVAILABLE_VOICES}
+                  selectedVoice={selectedVoice}
+                  onVoiceChange={setSelectedVoice}
+                />
+              </div>
+            </div>
+            
+            {/* 桌面端显示 */}
+            <div className="hidden md:flex md:flex-col md:gap-4 lg:gap-8 h-full">
+              <div className="flex-1">
+                {/* 文件上传组件 - 桌面端 */}
+                <FileUploader 
+                  isLoading={isLoading} 
+                  mammothLoaded={mammothLoaded} 
+                  onFileUpload={handleFileUpload} 
+                />
+              </div>
 
-            {/* 设置组件 */}
-            <SettingsPanel 
-              voices={AVAILABLE_VOICES}
-              selectedVoice={selectedVoice}
-              onVoiceChange={setSelectedVoice}
-            />
+              <div className="flex-1">
+                {/* 设置组件 - 桌面端 */}
+                <SettingsPanel 
+                  voices={AVAILABLE_VOICES}
+                  selectedVoice={selectedVoice}
+                  onVoiceChange={setSelectedVoice}
+                />
+              </div>
+            </div>
           </div>
 
           {/* 中间和右侧：文档预览和控制 */}
-          <div className="md:col-span-2">
+          <div className="md:col-span-2 overflow-hidden flex flex-col">
             {/* 文档内容和播放控制 */}
-            <Card className="shadow-lg h-full">
-              <Tabs defaultValue="preview" className="flex flex-col h-full">
-                <div className="px-6 pt-6">
+            <Card className="shadow-lg md:shadow-xl border border-gray-100 dark:border-gray-800 h-full overflow-hidden flex flex-col">
+              <Tabs defaultValue="preview" className="flex flex-col h-full overflow-hidden">
+                <div className="px-2 sm:px-4 md:px-6 pt-2 md:pt-4 pb-0">
                   <TabsList className="grid w-full grid-cols-2">
                     <TabsTrigger value="preview">文档预览</TabsTrigger>
                     <TabsTrigger value="settings">高级设置</TabsTrigger>
                   </TabsList>
                 </div>
 
-                <TabsContent value="preview" className="flex-1 px-6">
+                <TabsContent value="preview" className="flex-1 px-2 sm:px-4 md:px-6 pb-1 md:pb-2 overflow-hidden">
                   {/* 文档预览组件 */}
                   <DocumentViewer 
                     isLoading={isLoading}
@@ -735,53 +765,57 @@ const TTSReader = () => {
                   />
                 </TabsContent>
 
-                <TabsContent value="settings" className="px-6">
-                  <div className="mt-4 space-y-4 h-[calc(100vh-350px)] overflow-y-auto bg-white dark:bg-gray-900 p-4 rounded-md shadow-inner">
-                    <div className="space-y-4">
-                      <div className="space-y-2">
-                        <label className="text-sm font-medium">TTS API 端点</label>
-                        <input
-                          type="text"
-                          className="w-full p-2 border rounded-md text-sm bg-gray-50 dark:bg-gray-800"
-                          placeholder="https://your-tts-api.com/synthesize"
-                          value={apiEndpoint}
-                          onChange={handleApiEndpointChange}
-                        />
-                        <p className="text-xs text-muted-foreground mt-1">设置将自动保存</p>
+                <TabsContent value="settings" className="flex-1 px-2 sm:px-4 md:px-6 pb-1 md:pb-2 overflow-hidden">
+                  <div className="mt-1 sm:mt-2 border rounded-lg bg-white dark:bg-gray-900 shadow-inner h-full">
+                    <ScrollArea className="h-[calc(100vh-200px)] sm:h-[calc(100vh-220px)] w-full p-2 sm:p-4">
+                      <div className="space-y-3 md:space-y-5 lg:space-y-6">
+                        <div className="space-y-1 md:space-y-2">
+                          <label className="text-sm md:text-base font-medium">TTS API 端点</label>
+                          <input
+                            type="text"
+                            className="w-full p-1.5 md:p-2 lg:p-3 border rounded-md text-sm md:text-base bg-gray-50 dark:bg-gray-800"
+                            placeholder="https://your-tts-api.com/synthesize"
+                            value={apiEndpoint}
+                            onChange={handleApiEndpointChange}
+                          />
+                          <p className="text-xs md:text-sm text-muted-foreground mt-1 md:mt-2">设置将自动保存</p>
+                        </div>
+                        
+                        {/* <div className="space-y-1 md:space-y-2">
+                          <label className="text-sm md:text-base font-medium">TTS API 高级设置</label>
+                          <p className="text-xs md:text-sm text-muted-foreground">
+                            在这里可以添加更多高级设置选项，如语速、音量等控制。
+                          </p>
+                        </div>
+                        
+                        <div className="space-y-1 md:space-y-2">
+                          <label className="text-sm md:text-base font-medium">预加载设置</label>
+                          <p className="text-xs md:text-sm text-muted-foreground">
+                            系统会自动预加载后续{poolSize}个句子，以保证朗读连贯性。
+                          </p>
+                        </div> */}
                       </div>
-                      
-                      <div className="space-y-2">
-                        <label className="text-sm font-medium">TTS API 高级设置</label>
-                        <p className="text-xs text-muted-foreground">
-                          在这里可以添加更多高级设置选项，如语速、音量等控制。
-                        </p>
-                      </div>
-                      
-                      <div className="space-y-2">
-                        <label className="text-sm font-medium">预加载设置</label>
-                        <p className="text-xs text-muted-foreground">
-                          系统会自动预加载后续{poolSize}个句子，以保证朗读连贯性。
-                        </p>
-                      </div>
-                    </div>
+                    </ScrollArea>
                   </div>
                 </TabsContent>
 
                 {/* 播放控制组件 */}
-                <PlaybackControls 
-                  isPlaying={isPlaying}
-                  isLoading={isAudioLoading}
-                  currentIndex={currentSentenceIndex}
-                  totalCount={sentences.length}
-                  playbackRate={playbackRate}
-                  hasPrevious={currentSentenceIndex > 0}
-                  hasNext={currentSentenceIndex < sentences.length - 1}
-                  onTogglePlay={handleTogglePlayback}
-                  onPrevious={handlePreviousSentence}
-                  onNext={handleNextSentence}
-                  onPlaybackRateChange={setPlaybackRate}
-                  onProgressChange={handleProgressChange}
-                />
+                <div className="border-t border-gray-100 dark:border-gray-800 mt-auto">
+                  <PlaybackControls 
+                    isPlaying={isPlaying}
+                    isLoading={isAudioLoading}
+                    currentIndex={currentSentenceIndex}
+                    totalCount={sentences.length}
+                    playbackRate={playbackRate}
+                    hasPrevious={currentSentenceIndex > 0}
+                    hasNext={currentSentenceIndex < sentences.length - 1}
+                    onTogglePlay={handleTogglePlayback}
+                    onPrevious={handlePreviousSentence}
+                    onNext={handleNextSentence}
+                    onPlaybackRateChange={setPlaybackRate}
+                    onProgressChange={handleProgressChange}
+                  />
+                </div>
               </Tabs>
             </Card>
           </div>
