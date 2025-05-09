@@ -1,0 +1,53 @@
+---
+description: 介绍UI组件系统及其响应式设计特点，包括各主要组件的功能和布局适配策略
+globs: 
+alwaysApply: false
+---
+# UI组件系统
+
+项目使用了基于Tailwind CSS的UI组件系统，主要包括自定义组件和shadcn/ui组件库。
+
+## 主要UI组件
+
+### 文件上传器 [FileUploader.tsx](mdc:components/FileUploader.tsx)
+- 负责处理Word文档的上传
+- 显示上传状态和文件信息
+- 使用自适应布局适配不同屏幕尺寸
+
+### 设置面板 [SettingsPanel.tsx](mdc:components/SettingsPanel.tsx)
+- 提供TTS语音和其他设置选项
+- 使用下拉选择器实现语音选择
+- 同样支持响应式布局
+
+### 播放控制器 [PlaybackControls.tsx](mdc:components/PlaybackControls.tsx)
+- 控制文档朗读的播放、暂停
+- 提供上一句、下一句导航
+- 调整播放速率功能
+- 进度条显示当前阅读位置
+
+### 文档查看器 [DocumentViewer.tsx](mdc:components/DocumentViewer.tsx)
+- 显示转换后的Word文档
+- 实现句子高亮显示功能
+- 使用滚动区域优化长文档的阅读体验
+
+### 主题切换 [theme-toggle.tsx](mdc:components/ui/theme-toggle.tsx)
+- 提供亮/暗主题切换功能
+- 使用优雅的动画过渡效果
+
+## 响应式设计特点
+
+项目采用了完整的响应式设计方案:
+
+1. 使用Tailwind CSS的响应式前缀(sm:, md:, lg:等)
+2. 布局在不同断点下进行调整:
+   - 小屏幕: 紧凑布局，控件尺寸较小
+   - 中等屏幕: 平衡布局，适中控件尺寸
+   - 大屏幕: 宽松布局，较大控件尺寸
+3. 在一个屏幕内显示所有内容，避免垂直滚动
+4. 优化了组件间距，提供更加舒适的用户体验
+
+## 主题系统
+
+使用了Next.js的主题提供器([theme-provider.tsx](mdc:components/theme-provider.tsx))实现暗色/亮色主题切换，并存储用户偏好。
+
+

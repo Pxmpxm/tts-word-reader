@@ -1,0 +1,50 @@
+---
+description: 详细解析文本处理系统的工作流程，包括文档转换、句子解析和高亮功能
+globs: 
+alwaysApply: false
+---
+# 文本处理系统
+
+文档朗读系统的核心功能之一是将Word文档转换为HTML，然后解析为句子进行朗读。这些功能主要在[lib/textProcessor.ts](mdc:lib/textProcessor.ts)中实现。
+
+## 文档处理流程
+
+1. **文档转换**
+   - 使用Mammoth库将Word文档(.docx)转换为HTML
+   - 处理过程在主页面组件[app/page.tsx](mdc:app/page.tsx)的`handleFileUpload`函数中
+
+2. **文本提取和句子解析**
+   - `extractSentencesFromHtml`函数将HTML解析为句子数组
+   - 使用文本节点遍历和正则表达式识别句子边界
+   - 为每个句子记录其在文档中的位置信息
+
+3. **句子高亮**
+   - `highlightSentenceInHtml`函数在文档中高亮显示当前正在朗读的句子
+   - 动态修改DOM以添加高亮样式
+   - 实现自动滚动到当前句子位置
+
+## 句子结构
+
+句子通过[lib/types.ts](mdc:lib/types.ts)中的`Sentence`接口定义:
+
+```typescript
+export interface Sentence {
+  text: string       // 句子文本内容
+  nodeIndex: number  // 文本节点在文档中的索引
+  startOffset: number // 句子在文本节点中的起始位置
+  endOffset: number  // 句子在文本节点中的结束位置
+}
+```
+
+## 关键算法
+
+1. **句子分割算法**
+   - 使用正则表达式识别句号、问号、感叹号等标点作为句子边界
+   - 处理特殊情况如引号内的标点和缩写中的句点
+
+2. **文本节点遍历**
+   - 递归遍历HTML DOM树
+   - 提取所有文本节点并记录它们的位置
+   - 构建文本节点索引映射
+
+

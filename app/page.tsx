@@ -61,14 +61,14 @@ const TTSReader = () => {
   useEffect(() => {
     currentIndexRef.current = currentSentenceIndex;
     
-    // 每当索引变化时，预加载后续句子
-    if (mounted && sentences.length > 0) {
+    // 只有在播放状态下才预加载后续句子
+    if (mounted && sentences.length > 0 && isPlaying) {
       preloadSentences(currentSentenceIndex);
       
       // 清理远离当前索引的缓存
       cleanupCache(currentSentenceIndex);
     }
-  }, [currentSentenceIndex, sentences, mounted]);
+  }, [currentSentenceIndex, sentences, mounted, isPlaying]);
 
   // 监听playbackRate的变化，实时应用到当前音频
   useEffect(() => {
@@ -153,34 +153,48 @@ const TTSReader = () => {
 
   // 预请求函数 - 预加载多个句子
   const preloadSentences = async (startIndex: number) => {
-    if (!sentences.length || !mounted) return;
+    if (!sentences.length || !mounted || !isPlaying) return;
     
     // 确保不超出边界
     const endIndex = Math.min(startIndex + poolSize, sentences.length);
     
     for (let i = startIndex; i < endIndex; i++) {
-      // 如果已在缓存中且状态不是错误，跳过
-      if (audioCache.current.has(i) && audioCache.current.get(i)?.status !== 'error') continue;
+      // 如果已在缓存中且状态不是错误，跳过（包括pending和loading状态）
+      if (audioCache.current.has(i) && 
+          (audioCache.current.get(i)?.status === 'ready' || 
+           audioCache.current.get(i)?.status === 'loading' ||
+           audioCache.current.get(i)?.status === 'pending')) continue;
       
       const sentence = sentences[i];
       if (!sentence || sentence.text.length < 6) continue;
       
-      // 标记为加载中
+      // 按顺序预加载，一次只请求一个
+      // 先标记为pending状态，避免重复请求
       audioCache.current.set(i, { 
         index: i, 
-        status: 'loading' 
+        status: 'pending' 
       });
       
-      // 使用Promise不等待，异步处理
-      fetchTTSAudio(sentence.text, i).catch(err => {
+      try {
+        await fetchTTSAudio(sentence.text, i);
+        // 如果用户暂停了播放，停止预加载
+        if (!isPlaying) break;
+      } catch (err) {
         console.error(`预加载句子${i}失败:`, err);
-      });
+        if (!isPlaying) break;
+      }
     }
   };
   
   // 获取TTS音频
   const fetchTTSAudio = async (text: string, index: number): Promise<string> => {
     try {
+      // 更新状态为loading
+      audioCache.current.set(index, { 
+        index, 
+        status: 'loading' 
+      });
+      
       const response = await fetch(apiEndpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -300,6 +314,38 @@ const TTSReader = () => {
     }
   };
   
+  // 当文档加载或当前句子索引变化时，更新高亮显示
+  useEffect(() => {
+    if (!mounted) return
+
+    if (documentHtml && sentences.length > 0) {
+      updateHighlightedHtml()
+    }
+  }, [documentHtml, sentences, currentSentenceIndex, mounted])
+
+  // 高亮显示当前朗读的句子
+  const updateHighlightedHtml = () => {
+    if (!mounted || !documentHtml || sentences.length === 0 || currentSentenceIndex < 0) {
+      setHighlightedHtml(documentHtml)
+      return
+    }
+
+    const currentSentence = sentences[currentSentenceIndex]
+    if (!currentSentence) {
+      setHighlightedHtml(documentHtml)
+      return
+    }
+
+    // 高亮当前句子
+    const highlightedContent = highlightSentenceInHtml(
+      documentHtml, 
+      currentSentence, 
+      textNodesRef.current
+    )
+    
+    setHighlightedHtml(highlightedContent)
+  }
+  
   // 处理文件上传
   const handleFileUpload = async (selectedFile: File) => {
     if (!mounted || !mammothLoaded || !mammothRef.current) return
@@ -344,48 +390,14 @@ const TTSReader = () => {
       setCurrentSentenceIndex(0)
       currentIndexRef.current = 0 // 同时更新ref
       
-      // 文档加载完成后预加载初始句子
-      setTimeout(() => {
-        preloadSentences(0);
-      }, 500);
+      // 文档加载完成后不自动预加载，等待用户点击播放
+      // 移除之前的自动预加载代码
     } catch (error) {
       console.error("解析Word文档时出错:", error)
       alert("解析文档失败，请检查文件格式。")
     } finally {
       setIsLoading(false)
     }
-  }
-
-  // 当文档加载或当前句子索引变化时，更新高亮显示
-  useEffect(() => {
-    if (!mounted) return
-
-    if (documentHtml && sentences.length > 0) {
-      updateHighlightedHtml()
-    }
-  }, [documentHtml, sentences, currentSentenceIndex, mounted])
-
-  // 高亮显示当前朗读的句子
-  const updateHighlightedHtml = () => {
-    if (!mounted || !documentHtml || sentences.length === 0 || currentSentenceIndex < 0) {
-      setHighlightedHtml(documentHtml)
-      return
-    }
-
-    const currentSentence = sentences[currentSentenceIndex]
-    if (!currentSentence) {
-      setHighlightedHtml(documentHtml)
-      return
-    }
-
-    // 高亮当前句子
-    const highlightedContent = highlightSentenceInHtml(
-      documentHtml, 
-      currentSentence, 
-      textNodesRef.current
-    )
-    
-    setHighlightedHtml(highlightedContent)
   }
   
   // 处理API端点变更
@@ -491,6 +503,9 @@ const TTSReader = () => {
       setTimeout(() => {
         playCurrentSentence(true);
       }, 50);
+    } else {
+      // 如果不是播放状态，仅更新高亮，不加载音频
+      updateHighlightedHtml();
     }
   };
   
@@ -565,12 +580,36 @@ const TTSReader = () => {
       return true;
     }
     
-    // 触发预加载
-    preloadSentences(sentenceIndex);
+    // 只有在真正播放时才触发预加载
+    if (isPlaying || forcePlay) {
+      // 预加载当前句子
+      const cachedItem = audioCache.current.get(sentenceIndex);
+      
+      // 如果缓存中没有，则请求当前句子
+      if (!cachedItem || cachedItem.status === 'error') {
+        // 先标记为pending状态，避免重复请求
+        audioCache.current.set(sentenceIndex, { 
+          index: sentenceIndex, 
+          status: 'pending' 
+        });
+        
+        try {
+          await fetchTTSAudio(currentSentence.text, sentenceIndex);
+        } catch (err) {
+          console.error(`加载当前句子失败:`, err);
+        }
+      }
+      
+      // 预加载后续句子（只在播放状态下）
+      if (isPlaying) {
+        preloadSentences(sentenceIndex + 1);
+      }
+    }
     
     // 查看缓存中是否有当前句子的音频
     const cachedItem = audioCache.current.get(sentenceIndex);
     
+    // 如果有缓存项并且是就绪状态
     if (cachedItem && cachedItem.status === 'ready' && cachedItem.audio) {
       // 使用缓存的音频，无需加载
       if (audioRef.current) {
@@ -605,6 +644,47 @@ const TTSReader = () => {
         audioCache.current.delete(sentenceIndex);
         // 继续执行下面的获取逻辑
       }
+    }
+    // 如果音频正在加载中，显示加载状态并等待
+    else if (cachedItem && (cachedItem.status === 'loading' || cachedItem.status === 'pending')) {
+      setIsAudioLoading(true);
+      
+      // 等待缓存项准备好
+      let attempts = 0;
+      while (attempts < 20) { // 增加等待尝试次数
+        await new Promise(resolve => setTimeout(resolve, 100));
+        attempts++;
+        
+        const item = audioCache.current.get(sentenceIndex);
+        if (item && item.status === 'ready' && item.audio) {
+          if (audioRef.current) {
+            audioRef.current.pause();
+          }
+          
+          audioRef.current = item.audio;
+          
+          // 设置播放结束事件
+          setupAudioEndEvent(audioRef.current, sentenceIndex);
+          
+          // 播放音频
+          try {
+            await audioRef.current.play();
+            setIsAudioLoading(false);
+            return true;
+          } catch (error) {
+            console.error("播放缓存音频失败:", error);
+            break; // 跳出循环，尝试重新获取
+          }
+        }
+        
+        // 如果状态变为error，跳出循环
+        if (item && item.status === 'error') {
+          break;
+        }
+      }
+      
+      // 如果等待超时或出错，重置缓存并重新获取
+      audioCache.current.delete(sentenceIndex);
     }
     
     // 如果缓存中没有或播放失败，则重新获取
@@ -706,11 +786,11 @@ const TTSReader = () => {
             <div className="md:hidden flex space-x-2">
               <div className="w-1/2">
                 {/* 文件上传组件 - 移动端 */}
-                <FileUploader 
-                  isLoading={isLoading} 
-                  mammothLoaded={mammothLoaded} 
-                  onFileUpload={handleFileUpload} 
-                />
+            <FileUploader 
+              isLoading={isLoading} 
+              mammothLoaded={mammothLoaded} 
+              onFileUpload={handleFileUpload} 
+            />
               </div>
               <div className="w-1/2">
                 {/* 设置组件 - 移动端 */}
@@ -735,11 +815,11 @@ const TTSReader = () => {
 
               <div className="flex-1">
                 {/* 设置组件 - 桌面端 */}
-                <SettingsPanel 
-                  voices={AVAILABLE_VOICES}
-                  selectedVoice={selectedVoice}
-                  onVoiceChange={setSelectedVoice}
-                />
+            <SettingsPanel 
+              voices={AVAILABLE_VOICES}
+              selectedVoice={selectedVoice}
+              onVoiceChange={setSelectedVoice}
+            />
               </div>
             </div>
           </div>
@@ -771,28 +851,28 @@ const TTSReader = () => {
                       <div className="space-y-3 md:space-y-5 lg:space-y-6">
                         <div className="space-y-1 md:space-y-2">
                           <label className="text-sm md:text-base font-medium">TTS API 端点</label>
-                          <input
-                            type="text"
+                        <input
+                          type="text"
                             className="w-full p-1.5 md:p-2 lg:p-3 border rounded-md text-sm md:text-base bg-gray-50 dark:bg-gray-800"
-                            placeholder="https://your-tts-api.com/synthesize"
-                            value={apiEndpoint}
-                            onChange={handleApiEndpointChange}
-                          />
+                          placeholder="https://your-tts-api.com/synthesize"
+                          value={apiEndpoint}
+                          onChange={handleApiEndpointChange}
+                        />
                           <p className="text-xs md:text-sm text-muted-foreground mt-1 md:mt-2">设置将自动保存</p>
-                        </div>
-                        
+                      </div>
+                      
                         {/* <div className="space-y-1 md:space-y-2">
                           <label className="text-sm md:text-base font-medium">TTS API 高级设置</label>
                           <p className="text-xs md:text-sm text-muted-foreground">
-                            在这里可以添加更多高级设置选项，如语速、音量等控制。
-                          </p>
-                        </div>
-                        
+                          在这里可以添加更多高级设置选项，如语速、音量等控制。
+                        </p>
+                      </div>
+                      
                         <div className="space-y-1 md:space-y-2">
                           <label className="text-sm md:text-base font-medium">预加载设置</label>
                           <p className="text-xs md:text-sm text-muted-foreground">
-                            系统会自动预加载后续{poolSize}个句子，以保证朗读连贯性。
-                          </p>
+                          系统会自动预加载后续{poolSize}个句子，以保证朗读连贯性。
+                        </p>
                         </div> */}
                       </div>
                     </ScrollArea>
@@ -801,20 +881,20 @@ const TTSReader = () => {
 
                 {/* 播放控制组件 */}
                 <div className="border-t border-gray-100 dark:border-gray-800 mt-auto">
-                  <PlaybackControls 
-                    isPlaying={isPlaying}
-                    isLoading={isAudioLoading}
-                    currentIndex={currentSentenceIndex}
-                    totalCount={sentences.length}
-                    playbackRate={playbackRate}
-                    hasPrevious={currentSentenceIndex > 0}
-                    hasNext={currentSentenceIndex < sentences.length - 1}
-                    onTogglePlay={handleTogglePlayback}
-                    onPrevious={handlePreviousSentence}
-                    onNext={handleNextSentence}
-                    onPlaybackRateChange={setPlaybackRate}
-                    onProgressChange={handleProgressChange}
-                  />
+                <PlaybackControls 
+                  isPlaying={isPlaying}
+                  isLoading={isAudioLoading}
+                  currentIndex={currentSentenceIndex}
+                  totalCount={sentences.length}
+                  playbackRate={playbackRate}
+                  hasPrevious={currentSentenceIndex > 0}
+                  hasNext={currentSentenceIndex < sentences.length - 1}
+                  onTogglePlay={handleTogglePlayback}
+                  onPrevious={handlePreviousSentence}
+                  onNext={handleNextSentence}
+                  onPlaybackRateChange={setPlaybackRate}
+                  onProgressChange={handleProgressChange}
+                />
                 </div>
               </Tabs>
             </Card>

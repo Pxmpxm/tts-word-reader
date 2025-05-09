@@ -1,0 +1,71 @@
+---
+description: 阐述TTS API的交互流程、音频生成和缓存机制，以及相关的音频处理功能
+globs: 
+alwaysApply: false
+---
+---
+description:
+globs:
+alwaysApply: false
+---
+# TTS API 和音频处理
+
+文档朗读系统使用外部TTS API来将文本转换为语音。核心功能封装在[lib/ttsAPI.ts](mdc:lib/ttsAPI.ts)中。
+
+## API 交互流程
+
+1. 系统将文档文本拆分为句子 ([lib/textProcessor.ts](mdc:lib/textProcessor.ts))
+2. 对每个句子调用TTS API生成音频 ([lib/ttsAPI.ts](mdc:lib/ttsAPI.ts))
+3. 创建音频元素并设置播放参数
+4. 实现预加载机制以提高播放流畅度
+
+## TTS API 规格
+
+- 默认端点: `http://193.112.190.60:4399/api/v1/tts/generate`
+- 请求方法: POST
+- 请求体格式:
+  ```json
+  {
+    "text": "要转换的文本",
+    "voice": "zh-CN-YunjianNeural",
+    "rate": "0%",
+    "pitch": "0Hz",
+    "volume": "0%"
+  }
+  ```
+- 响应格式:
+  ```json
+  {
+    "success": true,
+    "data": {
+      "audio": "/path/to/audio.mp3"
+    }
+  }
+  ```
+
+## 音频缓存机制
+
+主页面组件[app/page.tsx](mdc:app/page.tsx)实现了音频缓存系统:
+
+1. 维护一个音频缓存Map (`audioCache`)
+2. 为当前播放位置周围的句子预加载音频
+3. 清理远离当前播放位置的缓存项
+4. 确保播放速率一致性
+
+## 相关类型定义
+
+音频相关的类型定义在[lib/types.ts](mdc:lib/types.ts)中:
+
+```typescript
+// TTS API响应类型
+export interface TTSResponse {
+  success: boolean
+  data?: {
+    audio: string
+  }
+  message?: string
+}
+```
+
+
+

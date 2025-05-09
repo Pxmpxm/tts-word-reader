@@ -1,0 +1,44 @@
+---
+description: 提供项目结构和技术栈的全面概览，帮助快速理解代码组织和主要组件关系
+globs: 
+alwaysApply: false
+---
+# 文档朗读系统 (TTS Word Reader) 项目概述
+
+这个项目是一个基于Web的文档朗读系统，主要功能是将Word文档转换为HTML并通过TTS（文本到语音）API进行朗读。
+
+## 项目结构
+
+- **app/** - 主应用目录
+  - [page.tsx](mdc:app/page.tsx) - 主页面组件，包含整个应用的核心逻辑
+  - [layout.tsx](mdc:app/layout.tsx) - 应用布局组件
+  - [globals.css](mdc:app/globals.css) - 全局样式
+
+- **components/** - 组件目录
+  - [FileUploader.tsx](mdc:components/FileUploader.tsx) - 文件上传组件
+  - [SettingsPanel.tsx](mdc:components/SettingsPanel.tsx) - 设置面板组件
+  - [PlaybackControls.tsx](mdc:components/PlaybackControls.tsx) - 播放控制组件
+  - [DocumentViewer.tsx](mdc:components/DocumentViewer.tsx) - 文档查看器组件
+  - [theme-provider.tsx](mdc:components/theme-provider.tsx) - 主题提供者组件
+  - **ui/** - UI组件库目录，包含各种通用组件如按钮、卡片等
+
+- **lib/** - 核心库和工具函数
+  - [textProcessor.ts](mdc:lib/textProcessor.ts) - 文本处理工具
+  - [playbackController.ts](mdc:lib/playbackController.ts) - 播放控制逻辑
+  - [ttsAPI.ts](mdc:lib/ttsAPI.ts) - TTS API封装
+  - [types.ts](mdc:lib/types.ts) - 类型定义
+  - [utils.ts](mdc:lib/utils.ts) - 通用工具函数
+
+- **hooks/** - 自定义React Hooks
+  - [use-mobile.tsx](mdc:hooks/use-mobile.tsx) - 移动设备检测Hook
+  - [use-toast.ts](mdc:hooks/use-toast.ts) - Toast通知Hook
+
+## 技术栈
+
+- Next.js - React框架
+- TypeScript - 类型安全
+- Tailwind CSS - 样式系统
+- Shadcn UI - UI组件库
+- Mammoth - Word文档到HTML转换库
+
+
