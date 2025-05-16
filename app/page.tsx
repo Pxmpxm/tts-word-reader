@@ -22,6 +22,8 @@ interface AudioCacheItem {
   url?: string;
   audio?: HTMLAudioElement;
   status: 'pending' | 'loading' | 'ready' | 'error';
+  textChunks?: string[];
+  currentChunkIndex?: number;
 }
 
 // 主组件 - 使用dynamic import强制客户端渲染
@@ -187,13 +189,21 @@ const TTSReader = () => {
   };
   
   // 获取TTS音频
-  const fetchTTSAudio = async (text: string, index: number): Promise<string> => {
+  const fetchTTSAudio = async (text: string, index: number, chunkIndex?: number): Promise<string> => {
     try {
-      // 更新状态为loading
-      audioCache.current.set(index, { 
-        index, 
-        status: 'loading' 
-      });
+      // 确保文本不超过150字符
+      if (text.length > 150) {
+        console.warn(`文本长度超过150字符，已截断: ${text.length}字符`);
+        text = text.substring(0, 150);
+      }
+      
+      // 更新状态为loading - 如果有chunkIndex，状态保持在original状态
+      if (chunkIndex === undefined) {
+        audioCache.current.set(index, { 
+          index, 
+          status: 'loading' 
+        });
+      }
       
       const response = await fetch(apiEndpoint, {
         method: 'POST',
@@ -238,18 +248,59 @@ const TTSReader = () => {
           audio.playbackRate = playbackRate;
         }
         
-        // 更新缓存状态为就绪
-        audioCache.current.set(index, { 
-          index, 
-          url: audioUrl, 
-          audio, 
-          status: 'ready' 
-        });
+        // 如果是分块的一部分
+        if (chunkIndex !== undefined) {
+          // 获取当前缓存项
+          const cachedItem = audioCache.current.get(index);
+          if (cachedItem && cachedItem.textChunks && cachedItem.textChunks.length > 0) {
+            // 如果是第一个块，更新主音频
+            if (chunkIndex === 0) {
+              audioCache.current.set(index, { 
+                ...cachedItem,
+                url: audioUrl, 
+                audio, 
+                status: 'ready',
+                currentChunkIndex: 0
+              });
+            } else {
+              // 为后续块创建新的缓存项（使用子索引）
+              const chunkCacheKey = `${index}_chunk_${chunkIndex}`;
+              // @ts-ignore - 使用字符串索引
+              audioCache.current.set(chunkCacheKey, {
+                index,
+                url: audioUrl,
+                audio,
+                status: 'ready',
+                chunkIndex
+              });
+            }
+          }
+        } else {
+          // 正常单块处理
+          audioCache.current.set(index, { 
+            index, 
+            url: audioUrl, 
+            audio, 
+            status: 'ready' 
+          });
+        }
       };
       
       // 设置加载错误回调
       audio.onerror = () => {
-        audioCache.current.set(index, { index, status: 'error' });
+        if (chunkIndex !== undefined) {
+          // 如果是分块的一部分，只标记该块为错误
+          const chunkCacheKey = `${index}_chunk_${chunkIndex}`;
+          // @ts-ignore - 使用字符串索引
+          audioCache.current.set(chunkCacheKey, {
+            index,
+            status: 'error',
+            chunkIndex
+          });
+        } else {
+          // 正常单块处理
+          audioCache.current.set(index, { index, status: 'error' });
+        }
       };
       
       // 设置音频源并加载
@@ -258,15 +309,47 @@ const TTSReader = () => {
       
       return audioUrl;
     } catch (error) {
-      audioCache.current.set(index, { index, status: 'error' });
+      if (chunkIndex !== undefined) {
+        // 如果是分块的一部分，只标记该块为错误
+        const chunkCacheKey = `${index}_chunk_${chunkIndex}`;
+        // @ts-ignore - 使用字符串索引
+        audioCache.current.set(chunkCacheKey, {
+          index,
+          status: 'error',
+          chunkIndex
+        });
+      } else {
+        // 正常单块处理
+        audioCache.current.set(index, { index, status: 'error' });
+      }
       throw error;
     }
   };
   
-  // 设置音频结束事件
-  const setupAudioEndEvent = (audio: HTMLAudioElement, index: number) => {
+  // 设置音频结束事件 - 修改以支持多块播放
+  const setupAudioEndEvent = (audio: HTMLAudioElement, index: number, isTextChunk: boolean = false) => {
     const handleEnded = () => {
-      // 确保我们仍然处理的是当前句子
+      // 如果是文本块的一部分
+      if (isTextChunk) {
+        const cachedItem = audioCache.current.get(index);
+        
+        if (cachedItem && 
+            cachedItem.textChunks && 
+            cachedItem.textChunks.length > 0 && 
+            cachedItem.currentChunkIndex !== undefined) {
+          
+          // 是否还有下一块
+          const nextChunkIndex = cachedItem.currentChunkIndex + 1;
+          
+          if (nextChunkIndex < cachedItem.textChunks.length) {
+            // 播放下一个文本块
+            playNextTextChunk(index, nextChunkIndex);
+            return;
+          }
+        }
+      }
+      
+      // 如果不是文本块或已经是最后一块，则处理常规的句子结束逻辑
       if (index === currentIndexRef.current) {
         // 如果有下一句，自动播放
         if (index < sentences.length - 1) {
@@ -301,15 +384,127 @@ const TTSReader = () => {
     audio.addEventListener('ended', handleEnded);
   };
   
+  // 播放下一个文本块
+  const playNextTextChunk = async (sentenceIndex: number, chunkIndex: number) => {
+    const cachedItem = audioCache.current.get(sentenceIndex);
+    
+    if (!cachedItem || !cachedItem.textChunks || chunkIndex >= cachedItem.textChunks.length) {
+      console.error('无法播放下一个文本块：数据不完整');
+      return false;
+    }
+    
+    // 更新当前块索引
+    audioCache.current.set(sentenceIndex, {
+      ...cachedItem,
+      currentChunkIndex: chunkIndex
+    });
+    
+    // 检查这个块是否已经缓存
+    const chunkCacheKey = `${sentenceIndex}_chunk_${chunkIndex}`;
+    // @ts-ignore - 使用字符串索引
+    const chunkCachedItem = audioCache.current.get(chunkCacheKey);
+    
+    if (chunkCachedItem && chunkCachedItem.status === 'ready' && chunkCachedItem.audio) {
+      // 已有缓存，直接播放
+      if (audioRef.current) {
+        audioRef.current.pause();
+      }
+      
+      audioRef.current = chunkCachedItem.audio;
+      
+      // 确保应用正确的播放速率
+      try {
+        const savedRate = localStorage.getItem('ttsPlaybackRate');
+        if (savedRate) {
+          audioRef.current.playbackRate = parseFloat(parseFloat(savedRate).toFixed(1));
+        } else {
+          audioRef.current.playbackRate = playbackRate;
+        }
+      } catch (error) {
+        audioRef.current.playbackRate = playbackRate;
+      }
+      
+      // 设置播放结束事件 - 标记为文本块
+      setupAudioEndEvent(audioRef.current, sentenceIndex, true);
+      
+      // 播放音频
+      try {
+        await audioRef.current.play();
+        return true;
+      } catch (error) {
+        console.error("播放缓存的块音频失败:", error);
+        // 尝试重新获取
+        // @ts-ignore - 使用字符串索引
+        audioCache.current.delete(chunkCacheKey);
+      }
+    }
+    
+    // 如果没有缓存或播放失败，获取新的音频
+    try {
+      // 从文本块数组获取当前块的文本
+      const chunkText = cachedItem.textChunks[chunkIndex];
+      
+      // 生成音频
+      await fetchTTSAudio(chunkText, sentenceIndex, chunkIndex);
+      
+      // 等待缓存项准备好
+      let attempts = 0;
+      while (attempts < 20) {
+        // @ts-ignore - 使用字符串索引
+        const item = audioCache.current.get(chunkCacheKey);
+        
+        if (item && item.status === 'ready' && item.audio) {
+          if (audioRef.current) {
+            audioRef.current.pause();
+          }
+          
+          audioRef.current = item.audio;
+          
+          // 设置播放结束事件 - 标记为文本块
+          setupAudioEndEvent(audioRef.current, sentenceIndex, true);
+          
+          // 播放音频
+          await audioRef.current.play();
+          return true;
+        }
+        
+        // 等待50ms后重试
+        await new Promise(resolve => setTimeout(resolve, 50));
+        attempts++;
+      }
+      
+      // 如果尝试超过次数限制，返回失败
+      return false;
+    } catch (error) {
+      console.error("获取块音频失败:", error);
+      return false;
+    }
+  };
+  
   // 清理缓存，在索引变化很大时调用
   const cleanupCache = (currentIndex: number) => {
     for (const [index, item] of audioCache.current.entries()) {
-      if (index < currentIndex - 5 || index > currentIndex + poolSize) {
+      // 如果是数字索引（非块缓存），且超出缓存范围
+      if (typeof index === 'number' && (index < currentIndex - 5 || index > currentIndex + poolSize)) {
         if (item.audio) {
           item.audio.pause();
           item.audio.src = '';
         }
         audioCache.current.delete(index);
+      }
+      
+      // 清理块缓存
+      if (typeof index === 'string' && index.includes('_chunk_')) {
+        // 提取出句子索引
+        const sentenceIndex = parseInt(index.split('_chunk_')[0]);
+        // 如果超出缓存范围
+        if (sentenceIndex < currentIndex - 5 || sentenceIndex > currentIndex + poolSize) {
+          if (item.audio) {
+            item.audio.pause();
+            item.audio.src = '';
+          }
+          audioCache.current.delete(index);
+        }
       }
     }
   };
@@ -586,9 +781,13 @@ const TTSReader = () => {
       const textChunks = [];
       const fullText = currentSentence.text;
       
-      // 尝试按标点符号分割文本
-      const punctuationRegex = /[，。！？；：,.!?;:]/g;
+      // 优化的分段逻辑：先尝试按标点符号分割，再按需按字符数分割
+      // 支持更多的中英文标点符号
+      const punctuationRegex = /[，。！？；：、,.!?;:|，。！？；：、,.!?;:|""''""''【】\[\]()（）]/g;
       let matches = [...fullText.matchAll(punctuationRegex)];
+      
+      // 确保标点位置按索引排序
+      matches.sort((a, b) => (a.index || 0) - (b.index || 0));
       
       if (matches.length > 0) {
         // 有标点符号，按标点分割
@@ -602,48 +801,73 @@ const TTSReader = () => {
           // 当前的标点符号位置
           const punctPos = match.index;
           
+          // 如果标点符号超出范围或已处理过，跳过
+          if (punctPos < lastPos) continue;
+          
           // 添加到当前块（包括标点）
           const segment = fullText.substring(lastPos, punctPos + 1);
           
+          // 检查当前块加上新片段是否会超过150字
           if (currentChunk.length + segment.length <= 150) {
-            // 如果添加这个片段不超过150字，直接添加
+            // 不超过，直接添加
             currentChunk += segment;
           } else {
-            // 如果当前块已经有内容，保存并重置
-            if (currentChunk.length > 0) {
-              textChunks.push(currentChunk);
-            }
+            // 超过了，需要处理
             
-            // 开始新的块，从这个片段开始
-            currentChunk = segment;
+            // 1. 如果当前块为空但片段本身超过150，需要强制分割片段
+            if (currentChunk.length === 0) {
+              // 强制按字符数切割this片段
+              let segmentPos = 0;
+              while (segmentPos < segment.length) {
+                const chunkSize = Math.min(150, segment.length - segmentPos);
+                textChunks.push(segment.substring(segmentPos, segmentPos + chunkSize));
+                segmentPos += chunkSize;
+              }
+              currentChunk = ""; // 保持为空
+            } else {
+              // 2. 当前块有内容，保存当前块并开始新块
+              textChunks.push(currentChunk);
+              
+              // 检查segment是否本身也超过150
+              if (segment.length > 150) {
+                // 分割segment
+                let segmentPos = 0;
+                while (segmentPos < segment.length) {
+                  const chunkSize = Math.min(150, segment.length - segmentPos);
+                  textChunks.push(segment.substring(segmentPos, segmentPos + chunkSize));
+                  segmentPos += chunkSize;
+                }
+                currentChunk = ""; // 重置为空
+              } else {
+                // segment不超过150，作为新块的开始
+                currentChunk = segment;
+              }
+            }
           }
           
           // 更新上次处理的位置
           lastPos = punctPos + 1;
+        }
+        
+        // 处理剩余部分
+        if (lastPos < fullText.length) {
+          const remainingText = fullText.substring(lastPos);
           
-          // 处理最后一个标点后的文本
-          if (i === matches.length - 1 && lastPos < fullText.length) {
-            const finalSegment = fullText.substring(lastPos);
+          // 检查剩余文本加上当前块是否超过150
+          if (currentChunk.length + remainingText.length <= 150) {
+            currentChunk += remainingText;
+          } else {
+            // 超过了，先保存当前块
+            if (currentChunk.length > 0) {
+              textChunks.push(currentChunk);
+              currentChunk = "";
+            }
             
-            if (currentChunk.length + finalSegment.length <= 150) {
-              currentChunk += finalSegment;
-            } else {
-              // 如果当前块有内容，先保存
-              if (currentChunk.length > 0) {
-                textChunks.push(currentChunk);
-              }
-              
-              // 处理剩余文本
-              if (finalSegment.length <= 150) {
-                textChunks.push(finalSegment);
-              } else {
-                // 如果剩余部分仍然过长，按字符数简单分割
-                let pos = 0;
-                while (pos < finalSegment.length) {
-                  textChunks.push(finalSegment.substring(pos, Math.min(pos + 150, finalSegment.length)));
-                  pos += 150;
-                }
-              }
+            // 分割剩余文本
+            let pos = 0;
+            while (pos < remainingText.length) {
+              textChunks.push(remainingText.substring(pos, Math.min(pos + 150, remainingText.length)));
+              pos += 150;
             }
           }
         }
@@ -659,53 +883,123 @@ const TTSReader = () => {
         }
       }
       
-      // 处理第一个文本块
-      if (textChunks.length > 0) {
+      // 确保所有块都不超过150字符
+      const finalChunks = textChunks.map(chunk => {
+        if (chunk.length > 150) {
+          console.warn(`分段后文本块仍超过150字符(${chunk.length})，强制截断`);
+          return chunk.substring(0, 150);
+        }
+        return chunk;
+      });
+      
+      // 处理所有文本块
+      if (finalChunks.length > 0) {
         try {
-          // 先标记为pending状态，避免重复请求
+          // 更新缓存状态，包含所有文本块信息
           audioCache.current.set(sentenceIndex, { 
             index: sentenceIndex, 
-            status: 'pending' 
+            status: 'pending',
+            textChunks: finalChunks,
+            currentChunkIndex: 0
           });
           
-          // 请求第一个文本块
-          await fetchTTSAudio(textChunks[0], sentenceIndex);
+          // 开始加载第一个文本块
+          await fetchTTSAudio(finalChunks[0], sentenceIndex, 0);
           
-          // 如果有后续文本块，先缓存起来供后续使用
-          // 这里只实现了基本的分块播放，实际上每个文本块应该按顺序播放
-          // 需要添加更复杂的逻辑来处理连续播放多个音频块
+          // 预加载第二个文本块（如果有）
+          if (finalChunks.length > 1 && (isPlaying || forcePlay)) {
+            setTimeout(async () => {
+              try {
+                await fetchTTSAudio(finalChunks[1], sentenceIndex, 1);
+              } catch (err) {
+                console.error(`预加载第二个文本块失败:`, err);
+              }
+            }, 100);
+          }
+          
+          // 等待第一个块准备好并播放
+          const firstChunkKey = `${sentenceIndex}_chunk_0`;
+          let attempts = 0;
+          
+          while (attempts < 20) {
+            // 检查主缓存项
+            const cachedItem = audioCache.current.get(sentenceIndex);
+            if (cachedItem && cachedItem.status === 'ready' && cachedItem.audio) {
+              if (audioRef.current) {
+                audioRef.current.pause();
+              }
+              
+              audioRef.current = cachedItem.audio;
+              
+              // 确保应用正确的播放速率
+              try {
+                const savedRate = localStorage.getItem('ttsPlaybackRate');
+                if (savedRate) {
+                  audioRef.current.playbackRate = parseFloat(parseFloat(savedRate).toFixed(1));
+                } else {
+                  audioRef.current.playbackRate = playbackRate;
+                }
+              } catch (error) {
+                audioRef.current.playbackRate = playbackRate;
+              }
+              
+              // 设置播放结束事件 - 标记为文本块
+              setupAudioEndEvent(audioRef.current, sentenceIndex, true);
+              
+              // 播放音频
+              await audioRef.current.play();
+              return true;
+            }
+            
+            // 等待50ms后重试
+            await new Promise(resolve => setTimeout(resolve, 50));
+            attempts++;
+          }
+          
+          // 如果第一个块加载失败，回退到普通处理方式
+          console.warn("分块处理失败，回退到普通处理");
+          audioCache.current.delete(sentenceIndex);
+          // 继续执行下面的正常处理代码
         } catch (err) {
           console.error(`处理分段句子失败:`, err);
-        }
-      }
-    } else {
-      // 只有在真正播放时才触发预加载
-      if (isPlaying || forcePlay) {
-        // 预加载当前句子
-        const cachedItem = audioCache.current.get(sentenceIndex);
-        
-        // 如果缓存中没有，则请求当前句子
-        if (!cachedItem || cachedItem.status === 'error') {
-          // 先标记为pending状态，避免重复请求
-          audioCache.current.set(sentenceIndex, { 
-            index: sentenceIndex, 
-            status: 'pending' 
-          });
-          
-          try {
-            await fetchTTSAudio(currentSentence.text, sentenceIndex);
-          } catch (err) {
-            console.error(`加载当前句子失败:`, err);
-          }
-        }
-        
-        // 预加载后续句子（只在播放状态下）
-        if (isPlaying) {
-          preloadSentences(sentenceIndex + 1);
+          // 回退到普通处理
+          audioCache.current.delete(sentenceIndex);
         }
       }
     }
+    
+    // 正常处理（非分段或分段失败后的回退）
+    // 只有在真正播放时才触发预加载
+    if (isPlaying || forcePlay) {
+      // 预加载当前句子
+      const cachedItem = audioCache.current.get(sentenceIndex);
       
+      // 如果缓存中没有，则请求当前句子
+      if (!cachedItem || cachedItem.status === 'error') {
+        // 先标记为pending状态，避免重复请求
+        audioCache.current.set(sentenceIndex, { 
+          index: sentenceIndex, 
+          status: 'pending' 
+        });
+        
+        try {
+          // 确保文本不超过150字符
+          const text = currentSentence.text.length > 150 
+            ? currentSentence.text.substring(0, 150) 
+            : currentSentence.text;
+          
+          await fetchTTSAudio(text, sentenceIndex);
+        } catch (err) {
+          console.error(`加载当前句子失败:`, err);
+        }
+      }
+      
+      // 预加载后续句子（只在播放状态下）
+      if (isPlaying) {
+        preloadSentences(sentenceIndex + 1);
+      }
+    }
+    
     // 查看缓存中是否有当前句子的音频
     const cachedItem = audioCache.current.get(sentenceIndex);
     
