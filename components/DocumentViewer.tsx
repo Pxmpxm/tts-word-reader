@@ -18,14 +18,15 @@ export function DocumentViewer({ isLoading, html, fontSize }: DocumentViewerProp
       if (highlightedElement) {
         highlightedElement.scrollIntoView({
           behavior: 'smooth',
-          block: 'center',
+          block: 'nearest',
+          inline: 'nearest'
         });
       }
     }
   }, [html]);
 
   return (
-    <div className="mt-1 sm:mt-2 border rounded-lg bg-white dark:bg-gray-900 shadow-inner h-full">
+    <div className="mt-1 sm:mt-2 border rounded-lg bg-white dark:bg-gray-900 shadow-inner h-full overflow-hidden">
       <ScrollArea className="h-[calc(100vh-200px)] sm:h-[calc(100vh-220px)] w-full p-2 sm:p-4">
         {isLoading ? (
           <div className="flex flex-col items-center justify-center h-36 sm:h-48 space-y-2 sm:space-y-3">

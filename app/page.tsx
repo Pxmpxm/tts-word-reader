@@ -1230,7 +1230,7 @@ const TTSReader = () => {
                   </TabsList>
                 </div>
 
-                <TabsContent value="preview" className="flex-1 px-2 sm:px-4 md:px-6 pb-1 md:pb-2 overflow-hidden">
+                <TabsContent value="preview" className="flex-1 px-2 sm:px-4 md:px-6 pb-1 md:pb-2 overflow-hidden  mb-3 ">
                   {/* 文档预览组件 */}
                   <DocumentViewer 
                     isLoading={isLoading}
@@ -1239,7 +1239,7 @@ const TTSReader = () => {
                   />
                 </TabsContent>
 
-                <TabsContent value="settings" className="flex-1 px-2 sm:px-4 md:px-6 pb-1 md:pb-2 overflow-hidden">
+                <TabsContent value="settings" className="flex-1 px-2 sm:px-4 md:px-6 pb-1 md:pb-2">
                   <div className="mt-1 sm:mt-2 border rounded-lg bg-white dark:bg-gray-900 shadow-inner h-full">
                     <ScrollArea className="h-[calc(100vh-200px)] sm:h-[calc(100vh-220px)] w-full p-2 sm:p-4">
                       <div className="space-y-3 md:space-y-5 lg:space-y-6">
