@@ -906,15 +906,29 @@ const TTSReader = () => {
           // 开始加载第一个文本块
           await fetchTTSAudio(finalChunks[0], sentenceIndex, 0);
           
-          // 预加载第二个文本块（如果有）
+          // 预加载所有后续文本块（而不只是第二块）
           if (finalChunks.length > 1 && (isPlaying || forcePlay)) {
-            setTimeout(async () => {
-              try {
-                await fetchTTSAudio(finalChunks[1], sentenceIndex, 1);
-              } catch (err) {
-                console.error(`预加载第二个文本块失败:`, err);
-              }
-            }, 100);
+            // 使用Promise.all并行加载所有后续块，提高加载效率
+            const preloadPromises = finalChunks.slice(1).map((chunk, index) => {
+              // 使用setTimeout引入轻微延迟，避免同时发起太多请求
+              return new Promise<void>(resolve => {
+                setTimeout(async () => {
+                  try {
+                    const chunkIndex = index + 1; // 因为我们从第二块开始（索引1）
+                    await fetchTTSAudio(chunk, sentenceIndex, chunkIndex);
+                    resolve();
+                  } catch (err) {
+                    console.error(`预加载文本块${index + 1}失败:`, err);
+                    resolve(); // 即使失败也resolve，避免阻塞其他请求
+                  }
+                }, index * 50); // 每个请求间隔50ms，避免同时发起太多请求
+              });
+            });
+            
+            // 不等待预加载完成，让它在后台异步进行
+            Promise.all(preloadPromises).catch(err => {
+              console.error("预加载文本块时出错:", err);
+            });
           }
           
           // 等待第一个块准备好并播放
