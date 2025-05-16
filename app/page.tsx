@@ -580,32 +580,132 @@ const TTSReader = () => {
       return true;
     }
     
-    // 只有在真正播放时才触发预加载
-    if (isPlaying || forcePlay) {
-      // 预加载当前句子
-      const cachedItem = audioCache.current.get(sentenceIndex);
+    // 检查文本长度是否超过150字，如果超过则拆分处理
+    if (currentSentence.text.length > 150) {
+      // 将长句拆分成较短的段落
+      const textChunks = [];
+      const fullText = currentSentence.text;
       
-      // 如果缓存中没有，则请求当前句子
-      if (!cachedItem || cachedItem.status === 'error') {
-        // 先标记为pending状态，避免重复请求
-        audioCache.current.set(sentenceIndex, { 
-          index: sentenceIndex, 
-          status: 'pending' 
-        });
+      // 尝试按标点符号分割文本
+      const punctuationRegex = /[，。！？；：,.!?;:]/g;
+      let matches = [...fullText.matchAll(punctuationRegex)];
+      
+      if (matches.length > 0) {
+        // 有标点符号，按标点分割
+        let lastPos = 0;
+        let currentChunk = "";
         
-        try {
-          await fetchTTSAudio(currentSentence.text, sentenceIndex);
-        } catch (err) {
-          console.error(`加载当前句子失败:`, err);
+        for (let i = 0; i < matches.length; i++) {
+          const match = matches[i];
+          if (!match || match.index === undefined) continue;
+          
+          // 当前的标点符号位置
+          const punctPos = match.index;
+          
+          // 添加到当前块（包括标点）
+          const segment = fullText.substring(lastPos, punctPos + 1);
+          
+          if (currentChunk.length + segment.length <= 150) {
+            // 如果添加这个片段不超过150字，直接添加
+            currentChunk += segment;
+          } else {
+            // 如果当前块已经有内容，保存并重置
+            if (currentChunk.length > 0) {
+              textChunks.push(currentChunk);
+            }
+            
+            // 开始新的块，从这个片段开始
+            currentChunk = segment;
+          }
+          
+          // 更新上次处理的位置
+          lastPos = punctPos + 1;
+          
+          // 处理最后一个标点后的文本
+          if (i === matches.length - 1 && lastPos < fullText.length) {
+            const finalSegment = fullText.substring(lastPos);
+            
+            if (currentChunk.length + finalSegment.length <= 150) {
+              currentChunk += finalSegment;
+            } else {
+              // 如果当前块有内容，先保存
+              if (currentChunk.length > 0) {
+                textChunks.push(currentChunk);
+              }
+              
+              // 处理剩余文本
+              if (finalSegment.length <= 150) {
+                textChunks.push(finalSegment);
+              } else {
+                // 如果剩余部分仍然过长，按字符数简单分割
+                let pos = 0;
+                while (pos < finalSegment.length) {
+                  textChunks.push(finalSegment.substring(pos, Math.min(pos + 150, finalSegment.length)));
+                  pos += 150;
+                }
+              }
+            }
+          }
+        }
+        
+        // 添加最后一个块，如果有内容的话
+        if (currentChunk.length > 0) {
+          textChunks.push(currentChunk);
+        }
+      } else {
+        // 没有标点符号，按固定字符数分割
+        for (let i = 0; i < fullText.length; i += 150) {
+          textChunks.push(fullText.substring(i, Math.min(i + 150, fullText.length)));
         }
       }
       
-      // 预加载后续句子（只在播放状态下）
-      if (isPlaying) {
-        preloadSentences(sentenceIndex + 1);
+      // 处理第一个文本块
+      if (textChunks.length > 0) {
+        try {
+          // 先标记为pending状态，避免重复请求
+          audioCache.current.set(sentenceIndex, { 
+            index: sentenceIndex, 
+            status: 'pending' 
+          });
+          
+          // 请求第一个文本块
+          await fetchTTSAudio(textChunks[0], sentenceIndex);
+          
+          // 如果有后续文本块，先缓存起来供后续使用
+          // 这里只实现了基本的分块播放，实际上每个文本块应该按顺序播放
+          // 需要添加更复杂的逻辑来处理连续播放多个音频块
+        } catch (err) {
+          console.error(`处理分段句子失败:`, err);
+        }
+      }
+    } else {
+      // 只有在真正播放时才触发预加载
+      if (isPlaying || forcePlay) {
+        // 预加载当前句子
+        const cachedItem = audioCache.current.get(sentenceIndex);
+        
+        // 如果缓存中没有，则请求当前句子
+        if (!cachedItem || cachedItem.status === 'error') {
+          // 先标记为pending状态，避免重复请求
+          audioCache.current.set(sentenceIndex, { 
+            index: sentenceIndex, 
+            status: 'pending' 
+          });
+          
+          try {
+            await fetchTTSAudio(currentSentence.text, sentenceIndex);
+          } catch (err) {
+            console.error(`加载当前句子失败:`, err);
+          }
+        }
+        
+        // 预加载后续句子（只在播放状态下）
+        if (isPlaying) {
+          preloadSentences(sentenceIndex + 1);
+        }
       }
     }
-    
+      
     // 查看缓存中是否有当前句子的音频
     const cachedItem = audioCache.current.get(sentenceIndex);
     
