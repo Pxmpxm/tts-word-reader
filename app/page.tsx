@@ -11,7 +11,7 @@ import { ThemeToggle } from "@/components/ui/theme-toggle"
 import { ScrollArea } from "@/components/ui/scroll-area"
 
 import { extractSentencesFromHtml, highlightSentenceInHtml } from "@/lib/textProcessor"
-import { generateSpeech } from "@/lib/ttsAPI"
+import { generateSpeechBlob } from "@/lib/ttsAPI"
 import {
   AVAILABLE_TTS_STYLES,
   AVAILABLE_TTS_VOICES,
@@ -21,17 +21,59 @@ import {
 import type { Sentence } from "@/lib/types"
 import dynamic from "next/dynamic"
 
-type AudioCacheKey = number | string;
+type AudioCacheStatus = "loading" | "ready" | "error";
 
-// 音频缓存项类型
+interface AudioChunk {
+  sentenceIndex: number;
+  chunkIndex: number;
+  text: string;
+  key: string;
+  persistentKey: string;
+}
+
 interface AudioCacheItem {
-  index: number;
+  key: string;
+  sentenceIndex: number;
+  chunkIndex: number;
+  text: string;
+  persistentKey: string;
+  status: AudioCacheStatus;
+  promise?: Promise<HTMLAudioElement>;
+  controller?: AbortController;
   url?: string;
   audio?: HTMLAudioElement;
-  status: 'pending' | 'loading' | 'ready' | 'error';
-  textChunks?: string[];
-  currentChunkIndex?: number;
+  lastUsed: number;
 }
+
+interface PreloadQueueItem {
+  chunk: AudioChunk;
+  sessionId: number;
+}
+
+interface PersistentAudioRecord {
+  key: string;
+  blob: Blob;
+  byteSize: number;
+  createdAt: number;
+  lastUsed: number;
+  apiEndpoint: string;
+  voice: string;
+  style: string;
+  text: string;
+}
+
+const MAX_TTS_TEXT_LENGTH = 150;
+const MIN_SPEAKABLE_TEXT_LENGTH = 6;
+const PRELOAD_SENTENCE_COUNT = 5;
+const CACHE_WINDOW_BEFORE = 5;
+const MAX_AUDIO_CACHE_ITEMS = 64;
+const MAX_PARALLEL_PRELOADS = 2;
+const PERSISTENT_AUDIO_DB_NAME = "tts-word-reader-audio-cache";
+const PERSISTENT_AUDIO_DB_VERSION = 1;
+const PERSISTENT_AUDIO_STORE_NAME = "audio";
+const PERSISTENT_AUDIO_CACHE_MAX_ITEMS = 500;
+const PERSISTENT_AUDIO_CACHE_MAX_BYTES = 300 * 1024 * 1024;
+const TTS_PUNCTUATION_REGEX = /[，。！？；：、,.!?;:]/g;
 
 // 主组件 - 使用dynamic import强制客户端渲染
 const TTSReader = () => {
@@ -56,8 +98,12 @@ const TTSReader = () => {
   const isPlayingRef = useRef<boolean>(false)
   const playbackSessionRef = useRef<number>(0)
   const activeRequestControllersRef = useRef<Set<AbortController>>(new Set())
-  const audioCache = useRef<Map<AudioCacheKey, AudioCacheItem>>(new Map()) // 音频缓存
-  const poolSize = 5 // 预请求池大小
+  const audioCache = useRef<Map<string, AudioCacheItem>>(new Map()) // 音频缓存
+  const preloadQueueRef = useRef<PreloadQueueItem[]>([])
+  const activePreloadCountRef = useRef(0)
+  const persistentAudioDbPromiseRef = useRef<Promise<IDBDatabase | null> | null>(null)
+  const persistentAudioBlobPromisesRef = useRef<Map<string, Promise<Blob>>>(new Map())
+  const poolSize = PRELOAD_SENTENCE_COUNT // 预请求池大小
   
   // 浏览器环境检测 - 简化为单个mounted状态
   const [mounted, setMounted] = useState(false)
@@ -73,6 +119,8 @@ const TTSReader = () => {
   };
 
   const abortActiveRequests = () => {
+    preloadQueueRef.current = [];
+    persistentAudioBlobPromisesRef.current.clear();
     activeRequestControllersRef.current.forEach((controller) => {
       controller.abort();
     });
@@ -80,13 +128,17 @@ const TTSReader = () => {
   };
 
   const beginPlaybackSession = () => {
-    abortActiveRequests();
+    preloadQueueRef.current = [];
     playbackSessionRef.current += 1;
     return playbackSessionRef.current;
   };
 
-  const invalidatePlaybackSession = () => {
-    abortActiveRequests();
+  const invalidatePlaybackSession = (abortRequests: boolean = true) => {
+    if (abortRequests) {
+      abortActiveRequests();
+    } else {
+      preloadQueueRef.current = [];
+    }
     playbackSessionRef.current += 1;
   };
 
@@ -120,6 +172,8 @@ const TTSReader = () => {
     audio.pause();
     audio.onended = null;
     audio.onloadeddata = null;
+    audio.oncanplaythrough = null;
+    audio.onpause = null;
     audio.onerror = null;
     audio.src = "";
 
@@ -254,78 +308,187 @@ const TTSReader = () => {
       releaseAudio(audioRef.current || undefined);
       audioRef.current = null;
       clearAudioCache();
+      persistentAudioDbPromiseRef.current?.then((db) => db?.close());
     };
   // 这里只需要组件卸载清理当前 ref 持有的资源。
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  // 预请求函数 - 预加载多个句子
-  const preloadSentences = async (startIndex: number, sessionId: number = playbackSessionRef.current) => {
-    if (!sentences.length || !mounted || !isPlayingRef.current || !isPlaybackSessionActive(sessionId)) return;
-    
-    // 确保不超出边界
-    const endIndex = Math.min(startIndex + poolSize, sentences.length);
-    
-    for (let i = startIndex; i < endIndex; i++) {
-      // 如果已在缓存中且状态不是错误，跳过（包括pending和loading状态）
-      if (audioCache.current.has(i) && 
-          (audioCache.current.get(i)?.status === 'ready' || 
-           audioCache.current.get(i)?.status === 'loading' ||
-           audioCache.current.get(i)?.status === 'pending')) continue;
-      
-      const sentence = sentences[i];
-      if (!sentence || sentence.text.length < 6) continue;
-      
-      // 按顺序预加载，一次只请求一个
-      // 先标记为pending状态，避免重复请求
-      audioCache.current.set(i, { 
-        index: i, 
-        status: 'pending' 
-      });
-      
-      try {
-        await fetchTTSAudio(sentence.text, i, undefined, sessionId);
-        // 如果用户暂停了播放，停止预加载
-        if (!isPlayingRef.current || !isPlaybackSessionActive(sessionId)) break;
-      } catch (err) {
-        if (!isAbortError(err)) {
-          console.error(`预加载句子${i}失败:`, err);
-        }
-        if (!isPlayingRef.current || !isPlaybackSessionActive(sessionId)) break;
-      }
+  const openPersistentAudioDb = () => {
+    if (typeof window === "undefined" || !window.indexedDB) {
+      return Promise.resolve(null);
     }
+
+    if (persistentAudioDbPromiseRef.current) {
+      return persistentAudioDbPromiseRef.current;
+    }
+
+    persistentAudioDbPromiseRef.current = new Promise<IDBDatabase | null>((resolve) => {
+      let request: IDBOpenDBRequest;
+      try {
+        request = window.indexedDB.open(PERSISTENT_AUDIO_DB_NAME, PERSISTENT_AUDIO_DB_VERSION);
+      } catch (error) {
+        console.error("打开 IndexedDB 音频缓存失败:", error);
+        resolve(null);
+        return;
+      }
+
+      request.onupgradeneeded = () => {
+        const db = request.result;
+        const store = db.objectStoreNames.contains(PERSISTENT_AUDIO_STORE_NAME)
+          ? request.transaction?.objectStore(PERSISTENT_AUDIO_STORE_NAME)
+          : db.createObjectStore(PERSISTENT_AUDIO_STORE_NAME, { keyPath: "key" });
+
+        if (store && !store.indexNames.contains("lastUsed")) {
+          store.createIndex("lastUsed", "lastUsed", { unique: false });
+        }
+      };
+
+      request.onsuccess = () => {
+        const db = request.result;
+        db.onversionchange = () => db.close();
+        resolve(db);
+      };
+
+      request.onerror = () => {
+        console.error("打开 IndexedDB 音频缓存失败:", request.error);
+        resolve(null);
+      };
+
+      request.onblocked = () => {
+        console.warn("IndexedDB 音频缓存升级被其他页面阻塞");
+      };
+    });
+
+    return persistentAudioDbPromiseRef.current;
   };
-  
-  // 获取TTS音频
-  const fetchTTSAudio = async (
-    text: string,
-    index: number,
-    chunkIndex?: number,
-    sessionId: number = playbackSessionRef.current
-  ): Promise<string> => {
-    const controller = new AbortController();
-    activeRequestControllersRef.current.add(controller);
 
-    try {
-      if (!isPlaybackSessionActive(sessionId)) {
-        throw new DOMException("播放会话已失效", "AbortError");
+  const readPersistentAudioBlob = async (key: string) => {
+    const db = await openPersistentAudioDb();
+    if (!db) return null;
+
+    return new Promise<Blob | null>((resolve) => {
+      const transaction = db.transaction(PERSISTENT_AUDIO_STORE_NAME, "readwrite");
+      const store = transaction.objectStore(PERSISTENT_AUDIO_STORE_NAME);
+      const request = store.get(key);
+
+      request.onsuccess = () => {
+        const record = request.result as PersistentAudioRecord | undefined;
+        if (!record?.blob) {
+          resolve(null);
+          return;
+        }
+
+        record.lastUsed = Date.now();
+        store.put(record);
+        resolve(record.blob);
+      };
+
+      request.onerror = () => {
+        console.error("读取 IndexedDB 音频缓存失败:", request.error);
+        resolve(null);
+      };
+
+      transaction.onerror = () => {
+        console.error("IndexedDB 音频缓存读取事务失败:", transaction.error);
+        resolve(null);
+      };
+    });
+  };
+
+  const prunePersistentAudioCache = async () => {
+    const db = await openPersistentAudioDb();
+    if (!db) return;
+
+    const records = await new Promise<PersistentAudioRecord[]>((resolve) => {
+      const transaction = db.transaction(PERSISTENT_AUDIO_STORE_NAME, "readonly");
+      const store = transaction.objectStore(PERSISTENT_AUDIO_STORE_NAME);
+      const request = store.getAll();
+
+      request.onsuccess = () => {
+        resolve((request.result as PersistentAudioRecord[]) || []);
+      };
+
+      request.onerror = () => {
+        console.error("读取 IndexedDB 音频缓存列表失败:", request.error);
+        resolve([]);
+      };
+    });
+
+    let totalBytes = records.reduce((sum, record) => sum + (record.byteSize || record.blob?.size || 0), 0);
+    let totalItems = records.length;
+    if (totalItems <= PERSISTENT_AUDIO_CACHE_MAX_ITEMS && totalBytes <= PERSISTENT_AUDIO_CACHE_MAX_BYTES) {
+      return;
+    }
+
+    const evictableRecords = [...records].sort((a, b) => (a.lastUsed || 0) - (b.lastUsed || 0));
+
+    await new Promise<void>((resolve) => {
+      const transaction = db.transaction(PERSISTENT_AUDIO_STORE_NAME, "readwrite");
+      const store = transaction.objectStore(PERSISTENT_AUDIO_STORE_NAME);
+
+      for (const record of evictableRecords) {
+        if (totalItems <= PERSISTENT_AUDIO_CACHE_MAX_ITEMS && totalBytes <= PERSISTENT_AUDIO_CACHE_MAX_BYTES) {
+          break;
+        }
+
+        store.delete(record.key);
+        totalItems -= 1;
+        totalBytes -= record.byteSize || record.blob?.size || 0;
       }
 
-      // 确保文本不超过150字符
-      if (text.length > 150) {
-        console.warn(`文本长度超过150字符，已截断: ${text.length}字符`);
-        text = text.substring(0, 150);
-      }
-      
-      // 更新状态为loading - 如果有chunkIndex，状态保持在original状态
-      if (chunkIndex === undefined) {
-        audioCache.current.set(index, { 
-          index, 
-          status: 'loading' 
-        });
-      }
-      
-      const audioUrl = await generateSpeech(text, selectedVoice, apiEndpoint, {
+      transaction.oncomplete = () => resolve();
+      transaction.onerror = () => {
+        console.error("清理 IndexedDB 音频缓存失败:", transaction.error);
+        resolve();
+      };
+    });
+  };
+
+  const writePersistentAudioBlob = async (chunk: AudioChunk, blob: Blob) => {
+    const db = await openPersistentAudioDb();
+    if (!db) return;
+
+    const now = Date.now();
+    const record: PersistentAudioRecord = {
+      key: chunk.persistentKey,
+      blob,
+      byteSize: blob.size,
+      createdAt: now,
+      lastUsed: now,
+      apiEndpoint,
+      voice: selectedVoice,
+      style: selectedStyle,
+      text: chunk.text,
+    };
+
+    await new Promise<void>((resolve) => {
+      const transaction = db.transaction(PERSISTENT_AUDIO_STORE_NAME, "readwrite");
+      const store = transaction.objectStore(PERSISTENT_AUDIO_STORE_NAME);
+
+      store.put(record);
+      transaction.oncomplete = () => resolve();
+      transaction.onerror = () => {
+        console.error("写入 IndexedDB 音频缓存失败:", transaction.error);
+        resolve();
+      };
+    });
+
+    prunePersistentAudioCache().catch((error) => {
+      console.error("清理 IndexedDB 音频缓存失败:", error);
+    });
+  };
+
+  const loadPersistentAudioBlob = (chunk: AudioChunk, controller: AbortController) => {
+    const existingPromise = persistentAudioBlobPromisesRef.current.get(chunk.persistentKey);
+    if (existingPromise) return existingPromise;
+
+    const promise = (async () => {
+      const persistentBlob = await readPersistentAudioBlob(chunk.persistentKey);
+      if (persistentBlob) return persistentBlob;
+
+      const requestText = chunk.text.slice(0, MAX_TTS_TEXT_LENGTH);
+      const audioBlob = await generateSpeechBlob(requestText, selectedVoice, apiEndpoint, {
         speed: 1.0,
         pitch: "0",
         volume: "0",
@@ -333,289 +496,431 @@ const TTSReader = () => {
         signal: controller.signal,
       });
 
-      if (!isPlaybackSessionActive(sessionId) || controller.signal.aborted) {
-        if (audioUrl.startsWith("blob:")) {
-          URL.revokeObjectURL(audioUrl);
-        }
-        throw new DOMException("播放会话已失效", "AbortError");
-      }
-      
-      // 创建音频对象
-      const audio = new Audio();
-      
-      // 设置加载完成回调
-      audio.onloadeddata = () => {
-        if (!isPlaybackSessionActive(sessionId) || controller.signal.aborted) {
-          releaseAudio(audio, audioUrl);
-          return;
-        }
-
-        applySavedPlaybackRate(audio);
-        
-        // 如果是分块的一部分
-        if (chunkIndex !== undefined) {
-          // 获取当前缓存项
-          const cachedItem = audioCache.current.get(index);
-          if (cachedItem && cachedItem.textChunks && cachedItem.textChunks.length > 0) {
-            // 如果是第一个块，更新主音频
-            if (chunkIndex === 0) {
-              audioCache.current.set(index, { 
-                ...cachedItem,
-                url: audioUrl, 
-                audio, 
-                status: 'ready',
-                currentChunkIndex: 0
-              });
-            } else {
-              // 为后续块创建新的缓存项（使用子索引）
-              const chunkCacheKey = `${index}_chunk_${chunkIndex}`;
-              audioCache.current.set(chunkCacheKey, {
-                index,
-                url: audioUrl,
-                audio,
-                status: 'ready',
-              });
-            }
-          } else {
-            releaseAudio(audio, audioUrl);
-          }
-        } else {
-          // 正常单块处理
-          audioCache.current.set(index, { 
-            index, 
-            url: audioUrl, 
-            audio, 
-            status: 'ready' 
-          });
-        }
-      };
-      
-      // 设置加载错误回调
-      audio.onerror = () => {
-        releaseAudio(audio, audioUrl);
-
-        if (!isPlaybackSessionActive(sessionId) || controller.signal.aborted) {
-          return;
-        }
-
-        if (chunkIndex !== undefined) {
-          // 如果是分块的一部分，只标记该块为错误
-          const chunkCacheKey = `${index}_chunk_${chunkIndex}`;
-          audioCache.current.set(chunkCacheKey, {
-            index,
-            status: 'error',
-          });
-        } else {
-          // 正常单块处理
-          audioCache.current.set(index, { index, status: 'error' });
-        }
-      };
-      
-      // 设置音频源并加载
-      audio.src = audioUrl;
-      audio.load();
-      
-      return audioUrl;
-    } catch (error) {
-      if (isAbortError(error) || !isPlaybackSessionActive(sessionId)) {
-        throw error;
-      }
-
-      if (chunkIndex !== undefined) {
-        // 如果是分块的一部分，只标记该块为错误
-        const chunkCacheKey = `${index}_chunk_${chunkIndex}`;
-        audioCache.current.set(chunkCacheKey, {
-          index,
-          status: 'error',
+      if (!controller.signal.aborted) {
+        writePersistentAudioBlob(chunk, audioBlob).catch((error) => {
+          console.error("写入 IndexedDB 音频缓存失败:", error);
         });
-      } else {
-        // 正常单块处理
-        audioCache.current.set(index, { index, status: 'error' });
       }
-      throw error;
-    } finally {
-      activeRequestControllersRef.current.delete(controller);
-    }
+
+      return audioBlob;
+    })().finally(() => {
+      persistentAudioBlobPromisesRef.current.delete(chunk.persistentKey);
+    });
+
+    persistentAudioBlobPromisesRef.current.set(chunk.persistentKey, promise);
+    return promise;
   };
-  
-  // 设置音频结束事件 - 修改以支持多块播放
-  const setupAudioEndEvent = (
-    audio: HTMLAudioElement,
-    index: number,
-    isTextChunk: boolean = false,
-    sessionId: number = playbackSessionRef.current
-  ) => {
-    audio.onended = () => {
-      if (!isPlaybackSessionActive(sessionId)) {
+
+  const splitTextIntoTTSChunks = (text: string) => {
+    const normalizedText = text.replace(/\s+/g, " ").trim();
+    if (!normalizedText) return [];
+    if (normalizedText.length <= MAX_TTS_TEXT_LENGTH) return [normalizedText];
+
+    const chunks: string[] = [];
+    let currentChunk = "";
+    let lastPosition = 0;
+    const matches = [...normalizedText.matchAll(TTS_PUNCTUATION_REGEX)];
+
+    const pushOversizedText = (value: string) => {
+      for (let i = 0; i < value.length; i += MAX_TTS_TEXT_LENGTH) {
+        const chunk = value.slice(i, i + MAX_TTS_TEXT_LENGTH).trim();
+        if (chunk) chunks.push(chunk);
+      }
+    };
+
+    const pushSegment = (segment: string) => {
+      const normalizedSegment = currentChunk ? segment : segment.trimStart();
+      if (!normalizedSegment.trim()) return;
+
+      if (normalizedSegment.length > MAX_TTS_TEXT_LENGTH) {
+        if (currentChunk.trim()) {
+          chunks.push(currentChunk.trim());
+          currentChunk = "";
+        }
+        pushOversizedText(normalizedSegment);
         return;
       }
 
-      // 如果是文本块的一部分
-      if (isTextChunk) {
-        const cachedItem = audioCache.current.get(index);
-        
-        if (cachedItem && 
-            cachedItem.textChunks && 
-            cachedItem.textChunks.length > 0 && 
-            cachedItem.currentChunkIndex !== undefined) {
-          
-          // 是否还有下一块
-          const nextChunkIndex = cachedItem.currentChunkIndex + 1;
-          
-          if (nextChunkIndex < cachedItem.textChunks.length) {
-            // 播放下一个文本块
-            playNextTextChunk(index, nextChunkIndex, sessionId);
-            return;
-          }
-        }
+      if (currentChunk.length + normalizedSegment.length <= MAX_TTS_TEXT_LENGTH) {
+        currentChunk += normalizedSegment;
+        return;
       }
-      
-      // 如果不是文本块或已经是最后一块，则处理常规的句子结束逻辑
-      if (index === currentIndexRef.current && isPlayingRef.current) {
-        // 如果有下一句，自动播放
-        if (index < sentences.length - 1) {
-          // 更新索引
-          const nextIndex = index + 1;
-          setCurrentSentenceIndex(nextIndex);
-          currentIndexRef.current = nextIndex; // 同时更新ref
-          
-          // 确保使用最新的速率设置
-          syncPlaybackRateFromLocalStorage();
-          
-          // 确保播放状态正确
-          if (!isPlayingRef.current) {
-            setPlayingState(true);
-          }
-          
-          // 延迟播放下一句
-          setTimeout(() => {
-            if (isPlaybackSessionActive(sessionId)) {
-              playCurrentSentence(true, sessionId);
-            }
-          }, 50);
-        } else {
-          // 已播放完所有句子，停止播放
-          setPlayingState(false);
-          setIsAudioLoading(false);
-        }
+
+      if (currentChunk.trim()) {
+        chunks.push(currentChunk.trim());
       }
+      currentChunk = normalizedSegment.trimStart();
     };
-  };
-  
-  // 播放下一个文本块
-  const playNextTextChunk = async (sentenceIndex: number, chunkIndex: number, sessionId: number) => {
-    if (!isPlaybackSessionActive(sessionId) || !isPlayingRef.current) {
-      return false;
+
+    if (matches.length === 0) {
+      pushOversizedText(normalizedText);
+      return chunks;
     }
 
-    const cachedItem = audioCache.current.get(sentenceIndex);
-    
-    if (!cachedItem || !cachedItem.textChunks || chunkIndex >= cachedItem.textChunks.length) {
-      console.error('无法播放下一个文本块：数据不完整');
-      return false;
+    for (const match of matches) {
+      if (match.index === undefined) continue;
+      const segment = normalizedText.slice(lastPosition, match.index + match[0].length);
+      pushSegment(segment);
+      lastPosition = match.index + match[0].length;
     }
-    
-    // 更新当前块索引
-    audioCache.current.set(sentenceIndex, {
-      ...cachedItem,
-      currentChunkIndex: chunkIndex
+
+    if (lastPosition < normalizedText.length) {
+      pushSegment(normalizedText.slice(lastPosition));
+    }
+
+    if (currentChunk.trim()) {
+      chunks.push(currentChunk.trim());
+    }
+
+    return chunks;
+  };
+
+  const makeAudioCacheKey = (sentenceIndex: number, chunkIndex: number, text: string) => {
+    return [apiEndpoint, selectedVoice, selectedStyle, sentenceIndex, chunkIndex, text].join("::");
+  };
+
+  const makePersistentAudioCacheKey = (text: string) => {
+    return ["tts-v1", apiEndpoint, selectedVoice, selectedStyle, text].join("::");
+  };
+
+  const getSentenceChunks = (sentenceIndex: number): AudioChunk[] => {
+    const sentence = sentences[sentenceIndex];
+    if (!sentence || sentence.text.trim().length < MIN_SPEAKABLE_TEXT_LENGTH) return [];
+
+    return splitTextIntoTTSChunks(sentence.text).map((text, chunkIndex) => ({
+      sentenceIndex,
+      chunkIndex,
+      text,
+      key: makeAudioCacheKey(sentenceIndex, chunkIndex, text),
+      persistentKey: makePersistentAudioCacheKey(text),
+    }));
+  };
+
+  const createReadyAudio = (
+    audioUrl: string,
+    controller: AbortController
+  ) => {
+    return new Promise<HTMLAudioElement>((resolve, reject) => {
+      const audio = new Audio();
+      let settled = false;
+
+      const cleanup = () => {
+        audio.onloadeddata = null;
+        audio.oncanplaythrough = null;
+        audio.onerror = null;
+        controller.signal.removeEventListener("abort", handleAbort);
+      };
+
+      const rejectWithRelease = (error: Error | DOMException) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        releaseAudio(audio, audioUrl);
+        reject(error);
+      };
+
+      const resolveReady = () => {
+        if (settled) return;
+        if (controller.signal.aborted) {
+          rejectWithRelease(new DOMException("播放会话已失效", "AbortError"));
+          return;
+        }
+
+        settled = true;
+        cleanup();
+        resolve(audio);
+      };
+
+      function handleAbort() {
+        rejectWithRelease(new DOMException("播放会话已失效", "AbortError"));
+      }
+
+      audio.preload = "auto";
+      audio.onloadeddata = resolveReady;
+      audio.oncanplaythrough = resolveReady;
+      audio.onerror = () => {
+        rejectWithRelease(new Error("音频数据加载失败"));
+      };
+      controller.signal.addEventListener("abort", handleAbort, { once: true });
+      audio.src = audioUrl;
+      audio.load();
     });
-    
-    // 检查这个块是否已经缓存
-    const chunkCacheKey = `${sentenceIndex}_chunk_${chunkIndex}`;
-    const chunkCachedItem = audioCache.current.get(chunkCacheKey);
-    
-    if (chunkCachedItem && chunkCachedItem.status === 'ready' && chunkCachedItem.audio) {
-      // 已有缓存，直接播放
-      stopCurrentAudio(false);
-      
-      audioRef.current = chunkCachedItem.audio;
-      resetAudioPosition(audioRef.current);
-      
-      // 确保应用正确的播放速率
-      applySavedPlaybackRate(audioRef.current);
-      
-      // 设置播放结束事件 - 标记为文本块
-      setupAudioEndEvent(audioRef.current, sentenceIndex, true, sessionId);
-      
-      // 播放音频
-      try {
-        if (!isPlaybackSessionActive(sessionId) || !isPlayingRef.current) return false;
-        await audioRef.current.play();
-        setIsAudioLoading(false);
-        return true;
-      } catch (error) {
-        console.error("播放缓存的块音频失败:", error);
-        // 尝试重新获取
-        audioCache.current.delete(chunkCacheKey);
-      }
-    }
-    
-    // 如果没有缓存或播放失败，获取新的音频
-    try {
-      // 从文本块数组获取当前块的文本
-      const chunkText = cachedItem.textChunks[chunkIndex];
-      
-      // 生成音频
-      await fetchTTSAudio(chunkText, sentenceIndex, chunkIndex, sessionId);
-      
-      // 等待缓存项准备好
-      let attempts = 0;
-      while (attempts < 20) {
-        if (!isPlaybackSessionActive(sessionId) || !isPlayingRef.current) {
-          return false;
-        }
+  };
 
-        const item = audioCache.current.get(chunkCacheKey);
-        
-        if (item && item.status === 'ready' && item.audio) {
-          stopCurrentAudio(false);
-          
-          audioRef.current = item.audio;
-          resetAudioPosition(audioRef.current);
-          
-          // 设置播放结束事件 - 标记为文本块
-          setupAudioEndEvent(audioRef.current, sentenceIndex, true, sessionId);
-          
-          // 播放音频
-          await audioRef.current.play();
-          setIsAudioLoading(false);
-          return true;
-        }
-        
-        // 等待50ms后重试
-        await new Promise(resolve => setTimeout(resolve, 50));
-        attempts++;
-      }
-      
-      // 如果尝试超过次数限制，返回失败
-      return false;
-    } catch (error) {
-      if (!isAbortError(error)) {
-        console.error("获取块音频失败:", error);
-      }
-      return false;
+  const trimAudioCache = () => {
+    if (audioCache.current.size <= MAX_AUDIO_CACHE_ITEMS) return;
+
+    const evictableItems = [...audioCache.current.values()]
+      .filter((item) => item.status !== "loading" && item.audio !== audioRef.current)
+      .sort((a, b) => a.lastUsed - b.lastUsed);
+
+    for (const item of evictableItems) {
+      if (audioCache.current.size <= MAX_AUDIO_CACHE_ITEMS) break;
+      releaseAudio(item.audio, item.url);
+      audioCache.current.delete(item.key);
     }
   };
-  
+
+  const loadAudioChunk = async (chunk: AudioChunk, sessionId: number) => {
+    const cachedItem = audioCache.current.get(chunk.key);
+    if (cachedItem?.status === "ready" && cachedItem.audio) {
+      cachedItem.lastUsed = Date.now();
+      applySavedPlaybackRate(cachedItem.audio);
+      return cachedItem.audio;
+    }
+
+    if (cachedItem?.status === "loading" && cachedItem.promise) {
+      cachedItem.lastUsed = Date.now();
+      return cachedItem.promise;
+    }
+
+    if (!isPlaybackSessionActive(sessionId)) {
+      throw new DOMException("播放会话已失效", "AbortError");
+    }
+
+    const controller = new AbortController();
+    activeRequestControllersRef.current.add(controller);
+
+    const item: AudioCacheItem = {
+      key: chunk.key,
+      sentenceIndex: chunk.sentenceIndex,
+      chunkIndex: chunk.chunkIndex,
+      text: chunk.text,
+      persistentKey: chunk.persistentKey,
+      status: "loading",
+      controller,
+      lastUsed: Date.now(),
+    };
+
+    const promise = (async () => {
+      let audioUrl = "";
+
+      try {
+        const audioBlob = await loadPersistentAudioBlob(chunk, controller);
+        if (controller.signal.aborted) {
+          throw new DOMException("播放会话已失效", "AbortError");
+        }
+
+        audioUrl = URL.createObjectURL(audioBlob);
+
+        const audio = await createReadyAudio(audioUrl, controller);
+        const currentItem = audioCache.current.get(chunk.key);
+        if (currentItem !== item || controller.signal.aborted) {
+          releaseAudio(audio, audioUrl);
+          throw new DOMException("播放会话已失效", "AbortError");
+        }
+
+        applySavedPlaybackRate(audio);
+        item.status = "ready";
+        item.audio = audio;
+        item.url = audioUrl;
+        item.promise = undefined;
+        item.controller = undefined;
+        item.lastUsed = Date.now();
+        trimAudioCache();
+        return audio;
+      } catch (error) {
+        const currentItem = audioCache.current.get(chunk.key);
+        if (currentItem === item) {
+          if (isAbortError(error) || controller.signal.aborted) {
+            audioCache.current.delete(chunk.key);
+          } else {
+            item.status = "error";
+            item.promise = undefined;
+            item.controller = undefined;
+            item.lastUsed = Date.now();
+          }
+        }
+        throw error;
+      } finally {
+        activeRequestControllersRef.current.delete(controller);
+      }
+    })();
+
+    item.promise = promise;
+    audioCache.current.set(chunk.key, item);
+    return promise;
+  };
+
+  const isChunkAlreadyRequested = (chunk: AudioChunk) => {
+    const cachedItem = audioCache.current.get(chunk.key);
+    return cachedItem?.status === "ready" || cachedItem?.status === "loading";
+  };
+
+  const drainPreloadQueue = () => {
+    if (!mounted || !isPlayingRef.current) return;
+
+    while (activePreloadCountRef.current < MAX_PARALLEL_PRELOADS && preloadQueueRef.current.length > 0) {
+      const queueItem = preloadQueueRef.current.shift();
+      if (!queueItem) return;
+
+      if (
+        !isPlaybackSessionActive(queueItem.sessionId) ||
+        !isPlayingRef.current ||
+        isChunkAlreadyRequested(queueItem.chunk)
+      ) {
+        continue;
+      }
+
+      activePreloadCountRef.current += 1;
+      loadAudioChunk(queueItem.chunk, queueItem.sessionId)
+        .catch((error) => {
+          if (!isAbortError(error) && isPlaybackSessionActive(queueItem.sessionId)) {
+            console.error(`预加载句子${queueItem.chunk.sentenceIndex + 1}失败:`, error);
+          }
+        })
+        .finally(() => {
+          activePreloadCountRef.current = Math.max(0, activePreloadCountRef.current - 1);
+          drainPreloadQueue();
+        });
+    }
+  };
+
+  const enqueuePreloadChunk = (chunk: AudioChunk, sessionId: number) => {
+    if (!isPlaybackSessionActive(sessionId) || isChunkAlreadyRequested(chunk)) return;
+    if (preloadQueueRef.current.some((item) => item.chunk.key === chunk.key)) return;
+
+    preloadQueueRef.current.push({ chunk, sessionId });
+    drainPreloadQueue();
+  };
+
+  const preloadPlaybackWindow = (
+    sentenceIndex: number,
+    sessionId: number = playbackSessionRef.current,
+    currentChunkIndex: number = -1
+  ) => {
+    if (!sentences.length || !mounted || !isPlayingRef.current || !isPlaybackSessionActive(sessionId)) return;
+
+    const currentSentenceChunks = getSentenceChunks(sentenceIndex);
+    for (const chunk of currentSentenceChunks.slice(currentChunkIndex + 1)) {
+      enqueuePreloadChunk(chunk, sessionId);
+    }
+
+    const endIndex = Math.min(sentenceIndex + 1 + poolSize, sentences.length);
+    const upcomingSentences: AudioChunk[][] = [];
+    for (let i = sentenceIndex + 1; i < endIndex; i++) {
+      const chunks = getSentenceChunks(i);
+      if (chunks.length > 0) upcomingSentences.push(chunks);
+    }
+
+    let chunkIndex = 0;
+    let queuedAny = true;
+    while (queuedAny) {
+      queuedAny = false;
+      for (const chunks of upcomingSentences) {
+        const chunk = chunks[chunkIndex];
+        if (chunk) {
+          enqueuePreloadChunk(chunk, sessionId);
+          queuedAny = true;
+        }
+      }
+      chunkIndex += 1;
+    }
+  };
+
+  // 兼容现有调用名：从指定句开始填充预加载窗口。
+  const preloadSentences = (startIndex: number, sessionId: number = playbackSessionRef.current) => {
+    preloadPlaybackWindow(Math.max(0, startIndex), sessionId);
+  };
+
+  const waitForAudioEnd = (audio: HTMLAudioElement) => {
+    return new Promise<boolean>((resolve, reject) => {
+      let settled = false;
+
+      const cleanup = () => {
+        audio.removeEventListener("ended", handleEnded);
+        audio.removeEventListener("pause", handlePause);
+        audio.removeEventListener("error", handleError);
+      };
+
+      const settle = (value: boolean) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        resolve(value);
+      };
+
+      function handleEnded() {
+        settle(true);
+      }
+
+      function handlePause() {
+        if (!audio.ended) settle(false);
+      }
+
+      function handleError() {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        reject(new Error("音频播放失败"));
+      }
+
+      audio.addEventListener("ended", handleEnded);
+      audio.addEventListener("pause", handlePause);
+      audio.addEventListener("error", handleError);
+    });
+  };
+
+  const playChunk = async (chunk: AudioChunk, sessionId: number) => {
+    setIsAudioLoading(true);
+
+    const audio = await loadAudioChunk(chunk, sessionId);
+    if (!isPlaybackSessionActive(sessionId) || !isPlayingRef.current) {
+      setIsAudioLoading(false);
+      return false;
+    }
+
+    stopCurrentAudio(false);
+    audioRef.current = audio;
+    resetAudioPosition(audio);
+    applySavedPlaybackRate(audio);
+
+    try {
+      await audio.play();
+      setIsAudioLoading(false);
+      preloadPlaybackWindow(chunk.sentenceIndex, sessionId, chunk.chunkIndex);
+      const ended = await waitForAudioEnd(audio);
+      return ended && isPlaybackSessionActive(sessionId) && isPlayingRef.current;
+    } catch (error) {
+      const cachedItem = audioCache.current.get(chunk.key);
+      if (cachedItem?.audio === audio) {
+        releaseAudio(cachedItem.audio, cachedItem.url);
+        audioCache.current.delete(chunk.key);
+      }
+      setIsAudioLoading(false);
+      throw error;
+    }
+  };
+
+  const playSentenceAtIndex = async (sentenceIndex: number, sessionId: number) => {
+    const chunks = getSentenceChunks(sentenceIndex);
+    if (chunks.length === 0) return true;
+
+    for (const chunk of chunks) {
+      if (!isPlaybackSessionActive(sessionId) || !isPlayingRef.current) return false;
+      const completed = await playChunk(chunk, sessionId);
+      if (!completed) return false;
+    }
+
+    return true;
+  };
+
   // 清理缓存，在索引变化很大时调用
   const cleanupCache = (currentIndex: number) => {
-    for (const [index, item] of audioCache.current.entries()) {
-      // 如果是数字索引（非块缓存），且超出缓存范围
-      if (typeof index === 'number' && (index < currentIndex - 5 || index > currentIndex + poolSize)) {
-        releaseAudio(item.audio, item.url);
-        audioCache.current.delete(index);
+    for (const [key, item] of audioCache.current.entries()) {
+      const outOfWindow =
+        item.sentenceIndex < currentIndex - CACHE_WINDOW_BEFORE ||
+        item.sentenceIndex > currentIndex + poolSize;
+
+      if (item.status === "error") {
+        audioCache.current.delete(key);
+        continue;
       }
-      
-      // 清理块缓存
-      if (typeof index === 'string' && index.includes('_chunk_')) {
-        // 提取出句子索引
-        const sentenceIndex = parseInt(index.split('_chunk_')[0]);
-        // 如果超出缓存范围
-        if (sentenceIndex < currentIndex - 5 || sentenceIndex > currentIndex + poolSize) {
-          releaseAudio(item.audio, item.url);
-          audioCache.current.delete(index);
-        }
+
+      if (outOfWindow && item.audio !== audioRef.current) {
+        item.controller?.abort();
+        releaseAudio(item.audio, item.url);
+        audioCache.current.delete(key);
       }
     }
   };
@@ -757,7 +1062,7 @@ const TTSReader = () => {
       playCurrentSentence(true, sessionId);
     } else {
       // 如果切换到停止状态，暂停当前播放的音频
-      invalidatePlaybackSession();
+      invalidatePlaybackSession(false);
       stopCurrentAudio(false);
       setIsAudioLoading(false);
     }
@@ -885,436 +1190,47 @@ const TTSReader = () => {
       setPlayingState(true);
     }
     
-    // 使用ref中的索引确保获取最新值
-    const sentenceIndex = currentIndexRef.current;
-    
+    let sentenceIndex = currentIndexRef.current;
     if (sentenceIndex < 0 || sentenceIndex >= sentences.length) {
       return false;
     }
-    
-    const currentSentence = sentences[sentenceIndex];
-    
-    // 检查文本长度，如果小于6个字符则跳过
-    if (currentSentence.text.length < 6) {
-      // 检查是否应自动播放下一句
-      if (sentenceIndex < sentences.length - 1) {
-        // 更新索引并播放下一句
-        const nextIndex = sentenceIndex + 1;
-        setCurrentSentenceIndex(nextIndex);
-        currentIndexRef.current = nextIndex; // 同时更新ref
-        
-        // 确保播放状态正确
-        if (!isPlayingRef.current) {
-          setPlayingState(true);
-        }
-        
-        // 延迟播放下一句
-        setTimeout(() => {
-          if (isPlaybackSessionActive(sessionId)) {
-            playCurrentSentence(true, sessionId);
-          }
-        }, 50);
-      } else {
-        // 已到最后一句，停止播放
-        setPlayingState(false);
-      }
-      
-      return true;
-    }
-    
-    // 检查文本长度是否超过150字，如果超过则拆分处理
-    if (currentSentence.text.length > 150) {
-      // 将长句拆分成较短的段落
-      const textChunks: string[] = [];
-      const fullText = currentSentence.text;
-      
-      // 优化的分段逻辑：先尝试按标点符号分割，再按需按字符数分割
-      // 支持更多的中英文标点符号
-      const punctuationRegex = /[，。！？；：、,.!?;:|，。！？；：、,.!?;:|""''""''【】\[\]()（）]/g;
-      const matches = [...fullText.matchAll(punctuationRegex)];
-      
-      // 确保标点位置按索引排序
-      matches.sort((a, b) => (a.index || 0) - (b.index || 0));
-      
-      if (matches.length > 0) {
-        // 有标点符号，按标点分割
-        let lastPos = 0;
-        let currentChunk = "";
-        
-        for (let i = 0; i < matches.length; i++) {
-          const match = matches[i];
-          if (!match || match.index === undefined) continue;
-          
-          // 当前的标点符号位置
-          const punctPos = match.index;
-          
-          // 如果标点符号超出范围或已处理过，跳过
-          if (punctPos < lastPos) continue;
-          
-          // 添加到当前块（包括标点）
-          const segment = fullText.substring(lastPos, punctPos + 1);
-          
-          // 检查当前块加上新片段是否会超过150字
-          if (currentChunk.length + segment.length <= 150) {
-            // 不超过，直接添加
-            currentChunk += segment;
-          } else {
-            // 超过了，需要处理
-            
-            // 1. 如果当前块为空但片段本身超过150，需要强制分割片段
-            if (currentChunk.length === 0) {
-              // 强制按字符数切割this片段
-              let segmentPos = 0;
-              while (segmentPos < segment.length) {
-                const chunkSize = Math.min(150, segment.length - segmentPos);
-                textChunks.push(segment.substring(segmentPos, segmentPos + chunkSize));
-                segmentPos += chunkSize;
-              }
-              currentChunk = ""; // 保持为空
-            } else {
-              // 2. 当前块有内容，保存当前块并开始新块
-              textChunks.push(currentChunk);
-              
-              // 检查segment是否本身也超过150
-              if (segment.length > 150) {
-                // 分割segment
-                let segmentPos = 0;
-                while (segmentPos < segment.length) {
-                  const chunkSize = Math.min(150, segment.length - segmentPos);
-                  textChunks.push(segment.substring(segmentPos, segmentPos + chunkSize));
-                  segmentPos += chunkSize;
-                }
-                currentChunk = ""; // 重置为空
-              } else {
-                // segment不超过150，作为新块的开始
-                currentChunk = segment;
-              }
-            }
-          }
-          
-          // 更新上次处理的位置
-          lastPos = punctPos + 1;
-        }
-        
-        // 处理剩余部分
-        if (lastPos < fullText.length) {
-          const remainingText = fullText.substring(lastPos);
-          
-          // 检查剩余文本加上当前块是否超过150
-          if (currentChunk.length + remainingText.length <= 150) {
-            currentChunk += remainingText;
-          } else {
-            // 超过了，先保存当前块
-            if (currentChunk.length > 0) {
-              textChunks.push(currentChunk);
-              currentChunk = "";
-            }
-            
-            // 分割剩余文本
-            let pos = 0;
-            while (pos < remainingText.length) {
-              textChunks.push(remainingText.substring(pos, Math.min(pos + 150, remainingText.length)));
-              pos += 150;
-            }
-          }
-        }
-        
-        // 添加最后一个块，如果有内容的话
-        if (currentChunk.length > 0) {
-          textChunks.push(currentChunk);
-        }
-      } else {
-        // 没有标点符号，按固定字符数分割
-        for (let i = 0; i < fullText.length; i += 150) {
-          textChunks.push(fullText.substring(i, Math.min(i + 150, fullText.length)));
-        }
-      }
-      
-      // 确保所有块都不超过150字符
-      const finalChunks = textChunks.map(chunk => {
-        if (chunk.length > 150) {
-          console.warn(`分段后文本块仍超过150字符(${chunk.length})，强制截断`);
-          return chunk.substring(0, 150);
-        }
-        return chunk;
-      });
-      
-      // 处理所有文本块
-      if (finalChunks.length > 0) {
-        try {
-          // 更新缓存状态，包含所有文本块信息
-          audioCache.current.set(sentenceIndex, { 
-            index: sentenceIndex, 
-            status: 'pending',
-            textChunks: finalChunks,
-            currentChunkIndex: 0
-          });
-          
-          // 开始加载第一个文本块
-          await fetchTTSAudio(finalChunks[0], sentenceIndex, 0, sessionId);
-          
-          // 预加载所有后续文本块（而不只是第二块）
-          if (finalChunks.length > 1 && (isPlayingRef.current || forcePlay)) {
-            // 使用Promise.all并行加载所有后续块，提高加载效率
-            const preloadPromises = finalChunks.slice(1).map((chunk, index) => {
-              // 使用setTimeout引入轻微延迟，避免同时发起太多请求
-              return new Promise<void>(resolve => {
-                setTimeout(async () => {
-                  try {
-                    if (!isPlaybackSessionActive(sessionId)) {
-                      resolve();
-                      return;
-                    }
-                    const chunkIndex = index + 1; // 因为我们从第二块开始（索引1）
-                    await fetchTTSAudio(chunk, sentenceIndex, chunkIndex, sessionId);
-                    resolve();
-                  } catch (err) {
-                    if (!isAbortError(err)) {
-                      console.error(`预加载文本块${index + 1}失败:`, err);
-                    }
-                    resolve(); // 即使失败也resolve，避免阻塞其他请求
-                  }
-                }, index * 50); // 每个请求间隔50ms，避免同时发起太多请求
-              });
-            });
-            
-            // 不等待预加载完成，让它在后台异步进行
-            Promise.all(preloadPromises).catch(err => {
-              console.error("预加载文本块时出错:", err);
-            });
-          }
-          
-          // 等待第一个块准备好并播放
-          let attempts = 0;
-          
-          while (attempts < 20) {
-            if (!isPlaybackSessionActive(sessionId) || !isPlayingRef.current) {
-              return false;
-            }
 
-            // 检查主缓存项
-            const cachedItem = audioCache.current.get(sentenceIndex);
-            if (cachedItem && cachedItem.status === 'ready' && cachedItem.audio) {
-              stopCurrentAudio(false);
-              
-              audioRef.current = cachedItem.audio;
-              resetAudioPosition(audioRef.current);
-              
-              // 确保应用正确的播放速率
-              applySavedPlaybackRate(audioRef.current);
-              
-              // 设置播放结束事件 - 标记为文本块
-              setupAudioEndEvent(audioRef.current, sentenceIndex, true, sessionId);
-              
-              // 播放音频
-              await audioRef.current.play();
-              setIsAudioLoading(false);
-              return true;
-            }
-            
-            // 等待50ms后重试
-            await new Promise(resolve => setTimeout(resolve, 50));
-            attempts++;
-          }
-          
-          // 如果第一个块加载失败，回退到普通处理方式
-          console.warn("分块处理失败，回退到普通处理");
-          audioCache.current.delete(sentenceIndex);
-          // 继续执行下面的正常处理代码
-        } catch (err) {
-          if (isAbortError(err)) {
-            return false;
-          }
-
-          console.error(`处理分段句子失败:`, err);
-          // 回退到普通处理
-          audioCache.current.delete(sentenceIndex);
-        }
-      }
-    }
-    
-    // 正常处理（非分段或分段失败后的回退）
-    // 只有在真正播放时才触发预加载
-    if (isPlayingRef.current || forcePlay) {
-      // 预加载当前句子
-      const cachedItem = audioCache.current.get(sentenceIndex);
-      
-      // 如果缓存中没有，则请求当前句子
-      if (!cachedItem || cachedItem.status === 'error') {
-        // 先标记为pending状态，避免重复请求
-        audioCache.current.set(sentenceIndex, { 
-          index: sentenceIndex, 
-          status: 'pending' 
-        });
-        
-        try {
-          // 确保文本不超过150字符
-          const text = currentSentence.text.length > 150 
-            ? currentSentence.text.substring(0, 150) 
-            : currentSentence.text;
-          
-          await fetchTTSAudio(text, sentenceIndex, undefined, sessionId);
-        } catch (err) {
-          if (isAbortError(err)) {
-            return false;
-          }
-          console.error(`加载当前句子失败:`, err);
-        }
-      }
-      
-      // 预加载后续句子（只在播放状态下）
-      if (isPlayingRef.current) {
-        preloadSentences(sentenceIndex + 1, sessionId);
-      }
-    }
-    
-    // 查看缓存中是否有当前句子的音频
-    const cachedItem = audioCache.current.get(sentenceIndex);
-    
-    // 如果有缓存项并且是就绪状态
-    if (cachedItem && cachedItem.status === 'ready' && cachedItem.audio) {
-      // 使用缓存的音频，无需加载
-      stopCurrentAudio(false);
-      
-      // 更新引用并设置播放速率
-      audioRef.current = cachedItem.audio;
-      resetAudioPosition(audioRef.current);
-      
-      // 确保应用正确的播放速率
-      applySavedPlaybackRate(audioRef.current);
-      
-      // 设置播放结束事件
-      setupAudioEndEvent(audioRef.current, sentenceIndex, false, sessionId);
-      
-      // 播放音频
-      try {
-        if (!isPlaybackSessionActive(sessionId) || !isPlayingRef.current) return false;
-        await audioRef.current.play();
-        setIsAudioLoading(false);
-        return true;
-      } catch (error) {
-        console.error("播放缓存音频失败:", error);
-        // 如果缓存音频播放失败，尝试重新获取
-        audioCache.current.delete(sentenceIndex);
-        // 继续执行下面的获取逻辑
-      }
-    }
-    // 如果音频正在加载中，显示加载状态并等待
-    else if (cachedItem && (cachedItem.status === 'loading' || cachedItem.status === 'pending')) {
-      setIsAudioLoading(true);
-      
-      // 等待缓存项准备好
-      let attempts = 0;
-      while (attempts < 20) { // 增加等待尝试次数
-        if (!isPlaybackSessionActive(sessionId) || !isPlayingRef.current) {
-          setIsAudioLoading(false);
-          return false;
-        }
-
-        await new Promise(resolve => setTimeout(resolve, 100));
-        attempts++;
-        
-        const item = audioCache.current.get(sentenceIndex);
-        if (item && item.status === 'ready' && item.audio) {
-          stopCurrentAudio(false);
-          
-          audioRef.current = item.audio;
-          resetAudioPosition(audioRef.current);
-          
-          // 设置播放结束事件
-          setupAudioEndEvent(audioRef.current, sentenceIndex, false, sessionId);
-          
-          // 播放音频
-          try {
-            if (!isPlaybackSessionActive(sessionId) || !isPlayingRef.current) return false;
-            await audioRef.current.play();
-            setIsAudioLoading(false);
-            return true;
-          } catch (error) {
-            console.error("播放缓存音频失败:", error);
-            break; // 跳出循环，尝试重新获取
-          }
-        }
-        
-        // 如果状态变为error，跳出循环
-        if (item && item.status === 'error') {
-          break;
-        }
-      }
-      
-      // 如果等待超时或出错，重置缓存并重新获取
-      audioCache.current.delete(sentenceIndex);
-    }
-    
-    // 如果缓存中没有或播放失败，则重新获取
-    setIsAudioLoading(true);
-    
     try {
-      // 获取音频URL
-      const audioUrl = await fetchTTSAudio(currentSentence.text, sentenceIndex, undefined, sessionId);
-      
-      // 等待缓存项准备好
-      let attempts = 0;
-      while (attempts < 10) {
+      while (sentenceIndex < sentences.length) {
         if (!isPlaybackSessionActive(sessionId) || !isPlayingRef.current) {
           setIsAudioLoading(false);
           return false;
         }
 
-        const item = audioCache.current.get(sentenceIndex);
-        if (item && item.status === 'ready' && item.audio) {
-          stopCurrentAudio(false);
-          
-          audioRef.current = item.audio;
-          resetAudioPosition(audioRef.current);
-          
-          // 设置播放结束事件
-          setupAudioEndEvent(audioRef.current, sentenceIndex, false, sessionId);
-          
-          // 播放音频
-          await audioRef.current.play();
-          
+        setCurrentSentenceIndex(sentenceIndex);
+        currentIndexRef.current = sentenceIndex;
+        cleanupCache(sentenceIndex);
+
+        const completed = await playSentenceAtIndex(sentenceIndex, sessionId);
+        if (!completed) {
           setIsAudioLoading(false);
-          return true;
+          return false;
         }
-        
-        // 等待100ms后重试
-        await new Promise(resolve => setTimeout(resolve, 100));
-        attempts++;
+
+        sentenceIndex += 1;
+        if (sentenceIndex < sentences.length) {
+          setCurrentSentenceIndex(sentenceIndex);
+          currentIndexRef.current = sentenceIndex;
+          syncPlaybackRateFromLocalStorage();
+          preloadSentences(sentenceIndex, sessionId);
+        }
       }
-      
-      // 如果缓存项未准备好，则创建新的音频对象
-      stopCurrentAudio(false);
-      
-      const audio = new Audio(audioUrl);
-      audioRef.current = audio;
-      
-      // 设置播放速率
-      applySavedPlaybackRate(audio);
-      
-      // 设置播放结束事件
-      setupAudioEndEvent(audio, sentenceIndex, false, sessionId);
-      
-      // 加载完成事件
-      audio.onloadeddata = () => {
-        if (!isPlaybackSessionActive(sessionId)) {
-          releaseAudio(audio);
-          return;
-        }
-        setIsAudioLoading(false);
-      };
-      
-      // 播放音频
-      if (!isPlaybackSessionActive(sessionId) || !isPlayingRef.current) return false;
-      await audio.play();
-      
+
+      setPlayingState(false);
+      setIsAudioLoading(false);
       return true;
     } catch (error) {
       if (isAbortError(error)) {
         setIsAudioLoading(false);
         return false;
       }
-      console.error('TTS处理错误:', error);
+
+      console.error("TTS处理错误:", error);
       setIsAudioLoading(false);
       setPlayingState(false);
       return false;

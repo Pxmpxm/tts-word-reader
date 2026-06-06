@@ -15,6 +15,16 @@ export async function generateSpeech(
   apiEndpoint: string,
   options: TTSRequestOptions = {}
 ): Promise<string> {
+  const audioBlob = await generateSpeechBlob(text, voice, apiEndpoint, options);
+  return URL.createObjectURL(audioBlob);
+}
+
+export async function generateSpeechBlob(
+  text: string,
+  voice: string,
+  apiEndpoint: string,
+  options: TTSRequestOptions = {}
+): Promise<Blob> {
   // 确保只在客户端运行
   if (typeof window === 'undefined') {
     throw new Error('TTS API只能在客户端环境调用');
@@ -66,5 +76,5 @@ export async function generateSpeech(
     throw new Error('TTS API返回了空音频');
   }
 
-  return URL.createObjectURL(audioBlob);
+  return audioBlob;
 }
