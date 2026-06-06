@@ -48,6 +48,7 @@ interface AudioCacheItem {
 interface PreloadQueueItem {
   chunk: AudioChunk;
   sessionId: number;
+  priority: number;
 }
 
 interface PersistentAudioRecord {
@@ -64,10 +65,15 @@ interface PersistentAudioRecord {
 
 const MAX_TTS_TEXT_LENGTH = 150;
 const MIN_SPEAKABLE_TEXT_LENGTH = 6;
-const PRELOAD_SENTENCE_COUNT = 5;
+const PRELOAD_SENTENCE_COUNT = 8;
 const CACHE_WINDOW_BEFORE = 5;
 const MAX_AUDIO_CACHE_ITEMS = 64;
-const MAX_PARALLEL_PRELOADS = 2;
+const MAX_PARALLEL_PRELOADS = 3;
+const URGENT_CURRENT_CHUNK_COUNT = 2;
+const PRELOAD_PRIORITY_CURRENT_CONTINUATION = 0;
+const PRELOAD_PRIORITY_UPCOMING_FIRST_CHUNK = 20;
+const PRELOAD_PRIORITY_CURRENT_REMAINDER = 50;
+const PRELOAD_PRIORITY_UPCOMING_REMAINDER = 100;
 const PERSISTENT_AUDIO_DB_NAME = "tts-word-reader-audio-cache";
 const PERSISTENT_AUDIO_DB_VERSION = 1;
 const PERSISTENT_AUDIO_STORE_NAME = "audio";
@@ -301,6 +307,7 @@ const TTSReader = () => {
     }
 
     loadMammoth()
+    openPersistentAudioDb();
     
     // 清理函数
     return () => {
@@ -776,11 +783,17 @@ const TTSReader = () => {
     }
   };
 
-  const enqueuePreloadChunk = (chunk: AudioChunk, sessionId: number) => {
+  const enqueuePreloadChunk = (chunk: AudioChunk, sessionId: number, priority: number) => {
     if (!isPlaybackSessionActive(sessionId) || isChunkAlreadyRequested(chunk)) return;
-    if (preloadQueueRef.current.some((item) => item.chunk.key === chunk.key)) return;
+    const existingQueueItem = preloadQueueRef.current.find((item) => item.chunk.key === chunk.key);
+    if (existingQueueItem) {
+      existingQueueItem.priority = Math.min(existingQueueItem.priority, priority);
+      preloadQueueRef.current.sort((a, b) => a.priority - b.priority);
+      return;
+    }
 
-    preloadQueueRef.current.push({ chunk, sessionId });
+    preloadQueueRef.current.push({ chunk, sessionId, priority });
+    preloadQueueRef.current.sort((a, b) => a.priority - b.priority);
     drainPreloadQueue();
   };
 
@@ -792,25 +805,48 @@ const TTSReader = () => {
     if (!sentences.length || !mounted || !isPlayingRef.current || !isPlaybackSessionActive(sessionId)) return;
 
     const currentSentenceChunks = getSentenceChunks(sentenceIndex);
-    for (const chunk of currentSentenceChunks.slice(currentChunkIndex + 1)) {
-      enqueuePreloadChunk(chunk, sessionId);
-    }
+    const currentContinuationChunks = currentSentenceChunks.slice(currentChunkIndex + 1);
+    currentContinuationChunks.slice(0, URGENT_CURRENT_CHUNK_COUNT).forEach((chunk, index) => {
+      enqueuePreloadChunk(chunk, sessionId, PRELOAD_PRIORITY_CURRENT_CONTINUATION + index);
+    });
 
     const endIndex = Math.min(sentenceIndex + 1 + poolSize, sentences.length);
-    const upcomingSentences: AudioChunk[][] = [];
+    const upcomingSentences: Array<{ distance: number; chunks: AudioChunk[] }> = [];
     for (let i = sentenceIndex + 1; i < endIndex; i++) {
       const chunks = getSentenceChunks(i);
-      if (chunks.length > 0) upcomingSentences.push(chunks);
+      if (chunks.length > 0) {
+        upcomingSentences.push({ distance: i - sentenceIndex, chunks });
+      }
     }
 
-    let chunkIndex = 0;
+    upcomingSentences.forEach(({ distance, chunks }) => {
+      enqueuePreloadChunk(
+        chunks[0],
+        sessionId,
+        PRELOAD_PRIORITY_UPCOMING_FIRST_CHUNK + distance
+      );
+    });
+
+    currentContinuationChunks.slice(URGENT_CURRENT_CHUNK_COUNT).forEach((chunk, index) => {
+      enqueuePreloadChunk(
+        chunk,
+        sessionId,
+        PRELOAD_PRIORITY_CURRENT_REMAINDER + index
+      );
+    });
+
+    let chunkIndex = 1;
     let queuedAny = true;
     while (queuedAny) {
       queuedAny = false;
-      for (const chunks of upcomingSentences) {
+      for (const { distance, chunks } of upcomingSentences) {
         const chunk = chunks[chunkIndex];
         if (chunk) {
-          enqueuePreloadChunk(chunk, sessionId);
+          enqueuePreloadChunk(
+            chunk,
+            sessionId,
+            PRELOAD_PRIORITY_UPCOMING_REMAINDER + chunkIndex * poolSize + distance
+          );
           queuedAny = true;
         }
       }
@@ -864,7 +900,9 @@ const TTSReader = () => {
   const playChunk = async (chunk: AudioChunk, sessionId: number) => {
     setIsAudioLoading(true);
 
-    const audio = await loadAudioChunk(chunk, sessionId);
+    const audioPromise = loadAudioChunk(chunk, sessionId);
+    preloadPlaybackWindow(chunk.sentenceIndex, sessionId, chunk.chunkIndex);
+    const audio = await audioPromise;
     if (!isPlaybackSessionActive(sessionId) || !isPlayingRef.current) {
       setIsAudioLoading(false);
       return false;
