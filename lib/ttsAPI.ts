@@ -1,17 +1,32 @@
-import { TTSResponse } from './types';
+import { DEFAULT_TTS_STYLE } from './ttsOptions';
+import type { TTSRequestOptions } from './types';
 
 /**
  * 调用TTS API生成语音
  * @param text 要转换为语音的文本
  * @param voice 使用的语音ID
  * @param apiEndpoint API端点URL
- * @returns 音频URL
+ * @param options 新TTS接口参数
+ * @returns 浏览器可播放的音频URL
  */
-export async function generateSpeech(text: string, voice: string, apiEndpoint: string): Promise<string> {
+export async function generateSpeech(
+  text: string,
+  voice: string,
+  apiEndpoint: string,
+  options: TTSRequestOptions = {}
+): Promise<string> {
   // 确保只在客户端运行
   if (typeof window === 'undefined') {
     throw new Error('TTS API只能在客户端环境调用');
   }
+
+  const {
+    speed = 1.0,
+    pitch = "0",
+    volume = "0",
+    style = DEFAULT_TTS_STYLE,
+    signal,
+  } = options;
   
   const response = await fetch(apiEndpoint, {
     method: 'POST',
@@ -19,61 +34,37 @@ export async function generateSpeech(text: string, voice: string, apiEndpoint: s
       'Content-Type': 'application/json',
     },
     body: JSON.stringify({
-      text: text,
-      voice: voice,
-      rate: "0%",
-      pitch: "0Hz",
-      volume: "0%"
+      input: text,
+      voice,
+      speed,
+      pitch,
+      style,
+      volume,
     }),
+    signal,
   });
   
   if (!response.ok) {
-    throw new Error(`TTS API调用失败: ${response.status}`);
-  }
-  
-  // 解析响应
-  const data = await response.json() as TTSResponse;
-  
-  if (!data.success || !data.data || !data.data.audio) {
-    throw new Error('获取音频URL失败');
-  }
-  
-  // 构建完整的音频URL
-  const apiUrl = new URL(apiEndpoint);
-  const baseServerUrl = `${apiUrl.protocol}//${apiUrl.host}`;
-  const audioPath = data.data.audio;
-  const formattedPath = audioPath.startsWith('/') ? audioPath : `/${audioPath}`;
-  return `${baseServerUrl}${formattedPath}`;
-}
-
-/**
- * 创建并配置音频元素
- * @param audioUrl 音频URL
- * @param playbackRate 播放速率
- * @returns 配置好的Audio元素
- */
-export function createAudioElement(audioUrl: string, playbackRate: number): HTMLAudioElement {
-  // 确保只在客户端运行
-  if (typeof window === 'undefined') {
-    throw new Error('Audio相关功能只能在客户端环境使用');
-  }
-  
-  // 从localStorage获取最新的播放速率（如果有）
-  let currentRate = playbackRate;
-  try {
-    const savedRate = localStorage.getItem('ttsPlaybackRate');
-    if (savedRate) {
-      currentRate = parseFloat(parseFloat(savedRate).toFixed(1));
+    let message = `TTS API调用失败: ${response.status}`;
+    try {
+      const errorData = await response.json();
+      message = errorData?.error?.message || message;
+    } catch {
+      // 错误响应不一定是JSON。
     }
-  } catch (error) {
-    console.error("读取播放速率设置失败:", error);
+    throw new Error(message);
   }
-  
-  const audio = new Audio(audioUrl);
-  
-  // 应用音频设置 (音量固定为100%)
-  audio.volume = 1.0;
-  audio.playbackRate = currentRate;
-  
-  return audio;
-} 
+
+  const contentType = response.headers.get('content-type') || '';
+  if (contentType.includes('application/json')) {
+    const data = await response.json();
+    throw new Error(data?.error?.message || 'TTS API未返回音频数据');
+  }
+
+  const audioBlob = await response.blob();
+  if (audioBlob.size === 0) {
+    throw new Error('TTS API返回了空音频');
+  }
+
+  return URL.createObjectURL(audioBlob);
+}

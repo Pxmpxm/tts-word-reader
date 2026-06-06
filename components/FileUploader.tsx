@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useId, useRef, useState } from 'react';
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Upload, FileText } from "lucide-react";
@@ -11,14 +11,28 @@ interface FileUploaderProps {
 
 export function FileUploader({ isLoading, mammothLoaded, onFileUpload }: FileUploaderProps) {
   const [file, setFile] = useState<File | null>(null);
+  const fileInputId = useId();
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const isDisabled = isLoading || !mammothLoaded;
 
   // 处理文件上传
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const selectedFile = e.target.files?.[0];
-    if (selectedFile && selectedFile.type === "application/vnd.openxmlformats-officedocument.wordprocessingml.document") {
+    if (!selectedFile) return;
+
+    const isDocx =
+      selectedFile.type === "application/vnd.openxmlformats-officedocument.wordprocessingml.document" ||
+      selectedFile.name.toLowerCase().endsWith(".docx");
+
+    if (isDocx) {
       setFile(selectedFile);
       onFileUpload(selectedFile);
+      e.target.value = "";
+      return;
     }
+
+    alert("请选择 .docx 格式的 Word 文档。");
+    e.target.value = "";
   };
 
   return (
@@ -29,15 +43,22 @@ export function FileUploader({ isLoading, mammothLoaded, onFileUpload }: FileUpl
             <Upload className="h-4 w-4 md:h-6 md:w-6 lg:h-8 lg:w-8 text-blue-600 dark:text-blue-400" />
           </div>
           <p className="text-xs md:text-sm lg:text-base text-muted-foreground mb-2 md:mb-3 lg:mb-4">上传Word文档</p>
-          <input type="file" id="file-upload" className="hidden" accept=".docx" onChange={handleFileChange} />
+          <input
+            ref={fileInputRef}
+            type="file"
+            id={fileInputId}
+            className="hidden"
+            accept=".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+            disabled={isDisabled}
+            onChange={handleFileChange}
+          />
           <Button
+            type="button"
             className="bg-gradient-to-r from-blue-600 to-cyan-500 hover:from-blue-700 hover:to-cyan-600 text-white px-3 md:px-4 lg:px-6 py-1 md:py-1.5 lg:py-2 text-xs md:text-sm lg:text-base"
-            asChild
-            disabled={isLoading || !mammothLoaded}
+            disabled={isDisabled}
+            onClick={() => fileInputRef.current?.click()}
           >
-            <label htmlFor="file-upload">
-              {isLoading ? "处理中..." : !mammothLoaded ? "加载中..." : "选择文件"}
-            </label>
+            {isLoading ? "处理中..." : !mammothLoaded ? "加载中..." : "选择文件"}
           </Button>
           {file && (
             <div className="mt-2 md:mt-3 lg:mt-4 flex items-center p-1 md:p-2 lg:p-3 bg-blue-50 dark:bg-blue-900/30 rounded-md w-full max-w-xs">

@@ -32,7 +32,8 @@ export function extractSentencesFromHtml(html: string): Sentence[] {
 
   // 从文本节点中提取句子，并记录位置信息
   const sentences: Sentence[] = [];
-  const sentenceEndRegex = /[.!?。！？；;]/;
+  const cjkSentenceEndRegex = /[。！？；]/;
+  const latinSentenceEndRegex = /[.!?;]/;
 
   for (let nodeIndex = 0; nodeIndex < textNodes.length; nodeIndex++) {
     const textNode = textNodes[nodeIndex];
@@ -41,9 +42,16 @@ export function extractSentencesFromHtml(html: string): Sentence[] {
 
     // 查找句子结束标记
     for (let i = 0; i < text.length; i++) {
+      const char = text[i];
+      const nextChar = text[i + 1];
+      const isCjkSentenceEnd = cjkSentenceEndRegex.test(char);
+      const isLatinSentenceEnd =
+        latinSentenceEndRegex.test(char) &&
+        (i === text.length - 1 || /\s/.test(nextChar) || i + 1 === text.length);
+
       if (
-        sentenceEndRegex.test(text[i]) &&
-        (i === text.length - 1 || /\s/.test(text[i + 1]) || i + 1 === text.length)
+        isCjkSentenceEnd ||
+        isLatinSentenceEnd
       ) {
         // 找到一个句子结束标记
         const sentenceText = text.substring(startOffset, i + 1).trim();
@@ -79,13 +87,11 @@ export function extractSentencesFromHtml(html: string): Sentence[] {
  * 高亮当前句子在HTML中的位置
  * @param documentHtml 原始HTML
  * @param sentence 当前句子
- * @param textNodes 文本节点数组
  * @returns 高亮后的HTML
  */
 export function highlightSentenceInHtml(
   documentHtml: string,
-  sentence: Sentence | null,
-  textNodes: Node[]
+  sentence: Sentence | null
 ): string {
   // 直接进行客户端检查
   if (typeof window === 'undefined' || !documentHtml || !sentence) {
@@ -130,7 +136,7 @@ export function highlightSentenceInHtml(
 
         // 创建高亮元素
         const span = document.createElement("span");
-        span.className = "current-reading bg-yellow-200";
+        span.className = "current-reading";
         span.textContent = middle;
 
         // 替换原始文本节点

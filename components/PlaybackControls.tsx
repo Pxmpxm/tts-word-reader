@@ -37,14 +37,6 @@ export function PlaybackControls({
   // 创建本地状态跟踪滑块值
   const [sliderValue, setSliderValue] = useState<number>(playbackRate * 10);
   
-  // 创建本地播放状态，确保UI正确显示
-  const [localIsPlaying, setLocalIsPlaying] = useState<boolean>(isPlaying);
-  
-  // 同步外部isPlaying到本地状态
-  useEffect(() => {
-    setLocalIsPlaying(isPlaying);
-  }, [isPlaying]);
-  
   // 同步外部playbackRate到本地状态
   useEffect(() => {
     setSliderValue(playbackRate * 10);
@@ -64,14 +56,13 @@ export function PlaybackControls({
   
   // 处理播放/暂停按钮点击
   const handleTogglePlay = () => {
-    // 立即更新本地状态，确保UI快速响应
-    setLocalIsPlaying(!localIsPlaying);
-    // 调用父组件的切换方法
     onTogglePlay();
   };
   
   // 处理进度条变化
   const handleProgressChange = (value: number[]) => {
+    if (totalCount <= 0) return;
+
     // 转换进度百分比为索引
     const newIndex = Math.round((value[0] / 100) * (totalCount - 1));
     onProgressChange(newIndex);
@@ -95,7 +86,7 @@ export function PlaybackControls({
                   size="icon"
                   onClick={onPrevious}
                   disabled={!hasPrevious || isLoading}
-                  className="border-gray-300 dark:border-gray-700 w-7 h-7 sm:w-8 sm:h-8 md:w-10 md:h-10 lg:w-12 lg:h-12 rounded-full"
+                  className="border-gray-300 dark:border-gray-700 w-7 h-7 sm:w-8 sm:h-8 md:w-10 md:h-10 lg:w-12 lg:h-12 rounded-full transition-all duration-300 hover:scale-105 active:scale-95 hover:bg-gray-100 dark:hover:bg-gray-800"
                 >
                   <SkipBack className="h-3 w-3 sm:h-4 sm:w-4 md:h-5 md:w-5 lg:h-6 lg:w-6" />
                 </Button>
@@ -114,24 +105,24 @@ export function PlaybackControls({
                   onClick={handleTogglePlay}
                   disabled={totalCount === 0 || isLoading}
                   className={`bg-gradient-to-r ${
-                    localIsPlaying
-                      ? "from-red-500 to-orange-500 hover:from-red-600 hover:to-orange-600"
-                      : "from-blue-600 to-cyan-500 hover:from-blue-700 hover:to-cyan-600"
-                  } text-white relative w-8 h-8 sm:w-10 sm:h-10 md:w-12 md:h-12 lg:w-14 lg:h-14 rounded-full`}
+                    isPlaying
+                      ? "from-red-500 to-orange-500 hover:from-red-600 hover:to-orange-600 shadow-orange-500/40"
+                      : "from-blue-600 to-cyan-500 hover:from-blue-700 hover:to-cyan-600 shadow-blue-500/40"
+                  } text-white relative w-8 h-8 sm:w-10 sm:h-10 md:w-12 md:h-12 lg:w-14 lg:h-14 rounded-full shadow-lg transition-all duration-300 hover:scale-105 active:scale-95`}
                 >
                   {isLoading ? (
                     <div className="absolute inset-0 flex items-center justify-center">
                       <div className="animate-spin h-3 w-3 sm:h-4 sm:w-4 md:h-5 md:w-5 lg:h-6 lg:w-6 border-2 border-white rounded-full border-t-transparent"></div>
                     </div>
                   ) : (
-                    localIsPlaying ? 
+                    isPlaying ? 
                       <Pause className="h-3 w-3 sm:h-4 sm:w-4 md:h-5 md:w-5 lg:h-6 lg:w-6" /> : 
                       <Play className="h-3 w-3 sm:h-4 sm:w-4 md:h-5 md:w-5 lg:h-6 lg:w-6 ml-0.5" />
                   )}
                 </Button>
               </TooltipTrigger>
               <TooltipContent>
-                <p>{localIsPlaying ? "暂停" : "播放"}</p>
+                <p>{isPlaying ? "暂停" : "播放"}</p>
               </TooltipContent>
             </Tooltip>
           </TooltipProvider>
@@ -144,7 +135,7 @@ export function PlaybackControls({
                   size="icon"
                   onClick={onNext}
                   disabled={!hasNext || isLoading}
-                  className="border-gray-300 dark:border-gray-700 w-7 h-7 sm:w-8 sm:h-8 md:w-10 md:h-10 lg:w-12 lg:h-12 rounded-full"
+                  className="border-gray-300 dark:border-gray-700 w-7 h-7 sm:w-8 sm:h-8 md:w-10 md:h-10 lg:w-12 lg:h-12 rounded-full transition-all duration-300 hover:scale-105 active:scale-95 hover:bg-gray-100 dark:hover:bg-gray-800"
                 >
                   <SkipForward className="h-3 w-3 sm:h-4 sm:w-4 md:h-5 md:w-5 lg:h-6 lg:w-6" />
                 </Button>
@@ -188,7 +179,7 @@ export function PlaybackControls({
         
         <div className="flex justify-between text-[10px] sm:text-xs md:text-sm text-muted-foreground mt-1 md:mt-2 lg:mt-3">
           <span>进度: {Math.round(progressPercentage)}%</span>
-          <span>句子: {currentIndex + 1} / {totalCount}</span>
+          <span>句子: {totalCount > 0 ? currentIndex + 1 : 0} / {totalCount}</span>
         </div>
       </div>
     </div>

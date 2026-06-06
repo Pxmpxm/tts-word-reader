@@ -10,13 +10,19 @@ export interface Sentence {
 export interface Voice {
   id: string
   name: string
+  group?: "female" | "male"
 }
 
-// 定义TTS API响应类型
-export interface TTSResponse {
-  success: boolean
-  data?: {
-    audio: string
-  }
-  message?: string
-} 
+// 定义可用语音风格类型
+export interface TTSStyleOption {
+  id: string
+  name: string
+}
+
+export interface TTSRequestOptions {
+  speed?: number
+  pitch?: string
+  volume?: string
+  style?: string
+  signal?: AbortSignal
+}

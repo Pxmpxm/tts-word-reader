@@ -11,10 +11,17 @@ import { ThemeToggle } from "@/components/ui/theme-toggle"
 import { ScrollArea } from "@/components/ui/scroll-area"
 
 import { extractSentencesFromHtml, highlightSentenceInHtml } from "@/lib/textProcessor"
-import { loadPlaybackRate } from "@/lib/playbackController"
-import { Voice, Sentence } from "@/lib/types"
-import { loadFromLocalStorage, delay, isClient } from "@/lib/utils"
+import { generateSpeech } from "@/lib/ttsAPI"
+import {
+  AVAILABLE_TTS_STYLES,
+  AVAILABLE_TTS_VOICES,
+  DEFAULT_TTS_API_ENDPOINT,
+  DEFAULT_TTS_STYLE
+} from "@/lib/ttsOptions"
+import type { Sentence } from "@/lib/types"
 import dynamic from "next/dynamic"
+
+type AudioCacheKey = number | string;
 
 // 音频缓存项类型
 interface AudioCacheItem {
@@ -28,49 +35,148 @@ interface AudioCacheItem {
 
 // 主组件 - 使用dynamic import强制客户端渲染
 const TTSReader = () => {
-  // 可用语音列表
-  const AVAILABLE_VOICES: Voice[] = [
-    { id: "zh-CN-YunjianNeural", name: "zh-CN-云健" },
-  ];
-  
   // 状态
-  const [file, setFile] = useState<File | null>(null)
   const [isPlaying, setIsPlaying] = useState(false)
   const [documentHtml, setDocumentHtml] = useState<string>("")
   const [currentSentenceIndex, setCurrentSentenceIndex] = useState<number>(0)
   const [sentences, setSentences] = useState<Sentence[]>([])
   const [isLoading, setIsLoading] = useState(false)
   const [isAudioLoading, setIsAudioLoading] = useState(false)
-  const [fontSize, setFontSize] = useState(100)
-  const [selectedVoice, setSelectedVoice] = useState<string>(AVAILABLE_VOICES[0].id)
-  const [apiEndpoint, setApiEndpoint] = useState<string>("http://193.112.190.60:4399/api/v1/tts/generate")
+  const fontSize = 100
+  const [selectedVoice, setSelectedVoice] = useState<string>(AVAILABLE_TTS_VOICES[0].id)
+  const [selectedStyle, setSelectedStyle] = useState<string>(DEFAULT_TTS_STYLE)
+  const [apiEndpoint, setApiEndpoint] = useState<string>(DEFAULT_TTS_API_ENDPOINT)
   const [highlightedHtml, setHighlightedHtml] = useState<string>("")
   const [playbackRate, setPlaybackRate] = useState<number>(1.0) // 默认值，客户端加载后再更新
   
   // Refs
   const audioRef = useRef<HTMLAudioElement | null>(null)
-  const textNodesRef = useRef<Node[]>([])
-  const mammothRef = useRef<any>(null)
+  const mammothRef = useRef<typeof import("mammoth") | null>(null)
   const currentIndexRef = useRef<number>(0) // 添加索引的ref，确保始终使用最新值
-  const audioCache = useRef<Map<number, AudioCacheItem>>(new Map()) // 音频缓存
+  const isPlayingRef = useRef<boolean>(false)
+  const playbackSessionRef = useRef<number>(0)
+  const activeRequestControllersRef = useRef<Set<AbortController>>(new Set())
+  const audioCache = useRef<Map<AudioCacheKey, AudioCacheItem>>(new Map()) // 音频缓存
   const poolSize = 5 // 预请求池大小
   
   // 浏览器环境检测 - 简化为单个mounted状态
   const [mounted, setMounted] = useState(false)
   const [mammothLoaded, setMammothLoaded] = useState(false)
 
+  const setPlayingState = (playing: boolean) => {
+    isPlayingRef.current = playing;
+    setIsPlaying(playing);
+  };
+
+  const isAbortError = (error: unknown) => {
+    return error instanceof DOMException && error.name === "AbortError";
+  };
+
+  const abortActiveRequests = () => {
+    activeRequestControllersRef.current.forEach((controller) => {
+      controller.abort();
+    });
+    activeRequestControllersRef.current.clear();
+  };
+
+  const beginPlaybackSession = () => {
+    abortActiveRequests();
+    playbackSessionRef.current += 1;
+    return playbackSessionRef.current;
+  };
+
+  const invalidatePlaybackSession = () => {
+    abortActiveRequests();
+    playbackSessionRef.current += 1;
+  };
+
+  const isPlaybackSessionActive = (sessionId: number) => {
+    return playbackSessionRef.current === sessionId;
+  };
+
+  const resetAudioPosition = (audio: HTMLAudioElement) => {
+    try {
+      audio.currentTime = 0;
+    } catch {
+      // 某些浏览器在音频元数据未加载时不允许设置 currentTime。
+    }
+  };
+
+  const stopCurrentAudio = (resetPosition: boolean = false) => {
+    if (!audioRef.current) return;
+
+    audioRef.current.pause();
+    audioRef.current.onended = null;
+
+    if (resetPosition) {
+      resetAudioPosition(audioRef.current);
+    }
+  };
+
+  const releaseAudio = (audio?: HTMLAudioElement, audioUrl?: string) => {
+    if (!audio) return;
+
+    const releasableUrl = audioUrl || audio.src;
+    audio.pause();
+    audio.onended = null;
+    audio.onloadeddata = null;
+    audio.onerror = null;
+    audio.src = "";
+
+    if (releasableUrl.startsWith("blob:")) {
+      URL.revokeObjectURL(releasableUrl);
+    }
+  };
+
+  const clearAudioCache = () => {
+    audioCache.current.forEach((item) => {
+      releaseAudio(item.audio, item.url);
+    });
+    audioCache.current.clear();
+  };
+
+  const stopPlaybackAndClearCache = () => {
+    invalidatePlaybackSession();
+    stopCurrentAudio(true);
+    audioRef.current = null;
+    clearAudioCache();
+    setIsAudioLoading(false);
+  };
+
+  const getSavedPlaybackRate = () => {
+    if (typeof window === "undefined") return 1.0;
+
+    const savedRate = localStorage.getItem("ttsPlaybackRate");
+    if (!savedRate) return 1.0;
+
+    const parsedRate = Number(savedRate);
+    if (!Number.isFinite(parsedRate)) return 1.0;
+
+    return parseFloat(parsedRate.toFixed(1));
+  };
+
+  const applySavedPlaybackRate = (audio: HTMLAudioElement) => {
+    audio.playbackRate = getSavedPlaybackRate();
+  };
+
   // 同步currentSentenceIndex到ref
   useEffect(() => {
     currentIndexRef.current = currentSentenceIndex;
     
     // 只有在播放状态下才预加载后续句子
-    if (mounted && sentences.length > 0 && isPlaying) {
-      preloadSentences(currentSentenceIndex);
+    if (mounted && sentences.length > 0 && isPlayingRef.current) {
+      preloadSentences(currentSentenceIndex, playbackSessionRef.current);
       
       // 清理远离当前索引的缓存
       cleanupCache(currentSentenceIndex);
     }
+  // 播放和缓存 helper 通过 ref 读取最新状态，避免异步任务被 render 闭包锁住。
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentSentenceIndex, sentences, mounted, isPlaying]);
+
+  useEffect(() => {
+    isPlayingRef.current = isPlaying;
+  }, [isPlaying]);
 
   // 监听playbackRate的变化，实时应用到当前音频
   useEffect(() => {
@@ -102,14 +208,21 @@ const TTSReader = () => {
   useEffect(() => {
     setMounted(true)
     
-    // 加载播放速率
+    // 加载用户常用语音、风格和速度
     try {
-      const savedRate = localStorage.getItem('ttsPlaybackRate');
-      if (savedRate) {
-        setPlaybackRate(parseFloat(parseFloat(savedRate).toFixed(1)));
+      const savedVoice = localStorage.getItem("ttsVoice");
+      if (savedVoice && AVAILABLE_TTS_VOICES.some((voice) => voice.id === savedVoice)) {
+        setSelectedVoice(savedVoice);
       }
+
+      const savedStyle = localStorage.getItem("ttsStyle");
+      if (savedStyle && AVAILABLE_TTS_STYLES.some((style) => style.id === savedStyle)) {
+        setSelectedStyle(savedStyle);
+      }
+
+      setPlaybackRate(getSavedPlaybackRate());
     } catch (error) {
-      console.error("加载播放速率失败:", error);
+      console.error("加载TTS用户偏好失败:", error);
     }
 
     // 加载API端点
@@ -137,25 +250,18 @@ const TTSReader = () => {
     
     // 清理函数
     return () => {
-      if (audioRef.current) {
-        audioRef.current.pause();
-        audioRef.current = null;
-      }
-      
-      // 清理所有缓存的音频
-      audioCache.current.forEach(item => {
-        if (item.audio) {
-          item.audio.pause();
-          item.audio.src = '';
-        }
-      });
-      audioCache.current.clear();
+      invalidatePlaybackSession();
+      releaseAudio(audioRef.current || undefined);
+      audioRef.current = null;
+      clearAudioCache();
     };
+  // 这里只需要组件卸载清理当前 ref 持有的资源。
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   // 预请求函数 - 预加载多个句子
-  const preloadSentences = async (startIndex: number) => {
-    if (!sentences.length || !mounted || !isPlaying) return;
+  const preloadSentences = async (startIndex: number, sessionId: number = playbackSessionRef.current) => {
+    if (!sentences.length || !mounted || !isPlayingRef.current || !isPlaybackSessionActive(sessionId)) return;
     
     // 确保不超出边界
     const endIndex = Math.min(startIndex + poolSize, sentences.length);
@@ -178,19 +284,33 @@ const TTSReader = () => {
       });
       
       try {
-        await fetchTTSAudio(sentence.text, i);
+        await fetchTTSAudio(sentence.text, i, undefined, sessionId);
         // 如果用户暂停了播放，停止预加载
-        if (!isPlaying) break;
+        if (!isPlayingRef.current || !isPlaybackSessionActive(sessionId)) break;
       } catch (err) {
-        console.error(`预加载句子${i}失败:`, err);
-        if (!isPlaying) break;
+        if (!isAbortError(err)) {
+          console.error(`预加载句子${i}失败:`, err);
+        }
+        if (!isPlayingRef.current || !isPlaybackSessionActive(sessionId)) break;
       }
     }
   };
   
   // 获取TTS音频
-  const fetchTTSAudio = async (text: string, index: number, chunkIndex?: number): Promise<string> => {
+  const fetchTTSAudio = async (
+    text: string,
+    index: number,
+    chunkIndex?: number,
+    sessionId: number = playbackSessionRef.current
+  ): Promise<string> => {
+    const controller = new AbortController();
+    activeRequestControllersRef.current.add(controller);
+
     try {
+      if (!isPlaybackSessionActive(sessionId)) {
+        throw new DOMException("播放会话已失效", "AbortError");
+      }
+
       // 确保文本不超过150字符
       if (text.length > 150) {
         console.warn(`文本长度超过150字符，已截断: ${text.length}字符`);
@@ -205,48 +325,32 @@ const TTSReader = () => {
         });
       }
       
-      const response = await fetch(apiEndpoint, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          text: text,
-          voice: selectedVoice,
-          rate: "0%",
-          pitch: "0Hz",
-          volume: "0%"
-        }),
+      const audioUrl = await generateSpeech(text, selectedVoice, apiEndpoint, {
+        speed: 1.0,
+        pitch: "0",
+        volume: "0",
+        style: selectedStyle,
+        signal: controller.signal,
       });
-      
-      if (!response.ok) throw new Error(`TTS API调用失败: ${response.status}`);
-      
-      const data = await response.json();
-      if (!data.success || !data.data || !data.data.audio) {
-        throw new Error('获取音频URL失败');
+
+      if (!isPlaybackSessionActive(sessionId) || controller.signal.aborted) {
+        if (audioUrl.startsWith("blob:")) {
+          URL.revokeObjectURL(audioUrl);
+        }
+        throw new DOMException("播放会话已失效", "AbortError");
       }
-      
-      // 构建音频URL
-      const apiUrl = new URL(apiEndpoint);
-      const baseServerUrl = `${apiUrl.protocol}//${apiUrl.host}`;
-      const audioPath = data.data.audio;
-      const formattedPath = audioPath.startsWith('/') ? audioPath : `/${audioPath}`;
-      const audioUrl = `${baseServerUrl}${formattedPath}`;
       
       // 创建音频对象
       const audio = new Audio();
       
       // 设置加载完成回调
       audio.onloadeddata = () => {
-        // 应用播放速率
-        try {
-          const savedRate = localStorage.getItem('ttsPlaybackRate');
-          if (savedRate) {
-            audio.playbackRate = parseFloat(parseFloat(savedRate).toFixed(1));
-          } else {
-            audio.playbackRate = playbackRate;
-          }
-        } catch (error) {
-          audio.playbackRate = playbackRate;
+        if (!isPlaybackSessionActive(sessionId) || controller.signal.aborted) {
+          releaseAudio(audio, audioUrl);
+          return;
         }
+
+        applySavedPlaybackRate(audio);
         
         // 如果是分块的一部分
         if (chunkIndex !== undefined) {
@@ -265,15 +369,15 @@ const TTSReader = () => {
             } else {
               // 为后续块创建新的缓存项（使用子索引）
               const chunkCacheKey = `${index}_chunk_${chunkIndex}`;
-              // @ts-ignore - 使用字符串索引
               audioCache.current.set(chunkCacheKey, {
                 index,
                 url: audioUrl,
                 audio,
                 status: 'ready',
-                chunkIndex
               });
             }
+          } else {
+            releaseAudio(audio, audioUrl);
           }
         } else {
           // 正常单块处理
@@ -288,14 +392,18 @@ const TTSReader = () => {
       
       // 设置加载错误回调
       audio.onerror = () => {
+        releaseAudio(audio, audioUrl);
+
+        if (!isPlaybackSessionActive(sessionId) || controller.signal.aborted) {
+          return;
+        }
+
         if (chunkIndex !== undefined) {
           // 如果是分块的一部分，只标记该块为错误
           const chunkCacheKey = `${index}_chunk_${chunkIndex}`;
-          // @ts-ignore - 使用字符串索引
           audioCache.current.set(chunkCacheKey, {
             index,
             status: 'error',
-            chunkIndex
           });
         } else {
           // 正常单块处理
@@ -309,26 +417,39 @@ const TTSReader = () => {
       
       return audioUrl;
     } catch (error) {
+      if (isAbortError(error) || !isPlaybackSessionActive(sessionId)) {
+        throw error;
+      }
+
       if (chunkIndex !== undefined) {
         // 如果是分块的一部分，只标记该块为错误
         const chunkCacheKey = `${index}_chunk_${chunkIndex}`;
-        // @ts-ignore - 使用字符串索引
         audioCache.current.set(chunkCacheKey, {
           index,
           status: 'error',
-          chunkIndex
         });
       } else {
         // 正常单块处理
         audioCache.current.set(index, { index, status: 'error' });
       }
       throw error;
+    } finally {
+      activeRequestControllersRef.current.delete(controller);
     }
   };
   
   // 设置音频结束事件 - 修改以支持多块播放
-  const setupAudioEndEvent = (audio: HTMLAudioElement, index: number, isTextChunk: boolean = false) => {
-    const handleEnded = () => {
+  const setupAudioEndEvent = (
+    audio: HTMLAudioElement,
+    index: number,
+    isTextChunk: boolean = false,
+    sessionId: number = playbackSessionRef.current
+  ) => {
+    audio.onended = () => {
+      if (!isPlaybackSessionActive(sessionId)) {
+        return;
+      }
+
       // 如果是文本块的一部分
       if (isTextChunk) {
         const cachedItem = audioCache.current.get(index);
@@ -343,14 +464,14 @@ const TTSReader = () => {
           
           if (nextChunkIndex < cachedItem.textChunks.length) {
             // 播放下一个文本块
-            playNextTextChunk(index, nextChunkIndex);
+            playNextTextChunk(index, nextChunkIndex, sessionId);
             return;
           }
         }
       }
       
       // 如果不是文本块或已经是最后一块，则处理常规的句子结束逻辑
-      if (index === currentIndexRef.current) {
+      if (index === currentIndexRef.current && isPlayingRef.current) {
         // 如果有下一句，自动播放
         if (index < sentences.length - 1) {
           // 更新索引
@@ -362,30 +483,31 @@ const TTSReader = () => {
           syncPlaybackRateFromLocalStorage();
           
           // 确保播放状态正确
-          if (!isPlaying) {
-            setIsPlaying(true);
+          if (!isPlayingRef.current) {
+            setPlayingState(true);
           }
           
           // 延迟播放下一句
           setTimeout(() => {
-            playCurrentSentence(true);
+            if (isPlaybackSessionActive(sessionId)) {
+              playCurrentSentence(true, sessionId);
+            }
           }, 50);
         } else {
           // 已播放完所有句子，停止播放
-          setIsPlaying(false);
+          setPlayingState(false);
+          setIsAudioLoading(false);
         }
       }
-      
-      // 移除监听器，避免内存泄漏
-      audio.removeEventListener('ended', handleEnded);
     };
-    
-    // 添加播放结束事件监听
-    audio.addEventListener('ended', handleEnded);
   };
   
   // 播放下一个文本块
-  const playNextTextChunk = async (sentenceIndex: number, chunkIndex: number) => {
+  const playNextTextChunk = async (sentenceIndex: number, chunkIndex: number, sessionId: number) => {
+    if (!isPlaybackSessionActive(sessionId) || !isPlayingRef.current) {
+      return false;
+    }
+
     const cachedItem = audioCache.current.get(sentenceIndex);
     
     if (!cachedItem || !cachedItem.textChunks || chunkIndex >= cachedItem.textChunks.length) {
@@ -401,40 +523,30 @@ const TTSReader = () => {
     
     // 检查这个块是否已经缓存
     const chunkCacheKey = `${sentenceIndex}_chunk_${chunkIndex}`;
-    // @ts-ignore - 使用字符串索引
     const chunkCachedItem = audioCache.current.get(chunkCacheKey);
     
     if (chunkCachedItem && chunkCachedItem.status === 'ready' && chunkCachedItem.audio) {
       // 已有缓存，直接播放
-      if (audioRef.current) {
-        audioRef.current.pause();
-      }
+      stopCurrentAudio(false);
       
       audioRef.current = chunkCachedItem.audio;
+      resetAudioPosition(audioRef.current);
       
       // 确保应用正确的播放速率
-      try {
-        const savedRate = localStorage.getItem('ttsPlaybackRate');
-        if (savedRate) {
-          audioRef.current.playbackRate = parseFloat(parseFloat(savedRate).toFixed(1));
-        } else {
-          audioRef.current.playbackRate = playbackRate;
-        }
-      } catch (error) {
-        audioRef.current.playbackRate = playbackRate;
-      }
+      applySavedPlaybackRate(audioRef.current);
       
       // 设置播放结束事件 - 标记为文本块
-      setupAudioEndEvent(audioRef.current, sentenceIndex, true);
+      setupAudioEndEvent(audioRef.current, sentenceIndex, true, sessionId);
       
       // 播放音频
       try {
+        if (!isPlaybackSessionActive(sessionId) || !isPlayingRef.current) return false;
         await audioRef.current.play();
+        setIsAudioLoading(false);
         return true;
       } catch (error) {
         console.error("播放缓存的块音频失败:", error);
         // 尝试重新获取
-        // @ts-ignore - 使用字符串索引
         audioCache.current.delete(chunkCacheKey);
       }
     }
@@ -445,26 +557,29 @@ const TTSReader = () => {
       const chunkText = cachedItem.textChunks[chunkIndex];
       
       // 生成音频
-      await fetchTTSAudio(chunkText, sentenceIndex, chunkIndex);
+      await fetchTTSAudio(chunkText, sentenceIndex, chunkIndex, sessionId);
       
       // 等待缓存项准备好
       let attempts = 0;
       while (attempts < 20) {
-        // @ts-ignore - 使用字符串索引
+        if (!isPlaybackSessionActive(sessionId) || !isPlayingRef.current) {
+          return false;
+        }
+
         const item = audioCache.current.get(chunkCacheKey);
         
         if (item && item.status === 'ready' && item.audio) {
-          if (audioRef.current) {
-            audioRef.current.pause();
-          }
+          stopCurrentAudio(false);
           
           audioRef.current = item.audio;
+          resetAudioPosition(audioRef.current);
           
           // 设置播放结束事件 - 标记为文本块
-          setupAudioEndEvent(audioRef.current, sentenceIndex, true);
+          setupAudioEndEvent(audioRef.current, sentenceIndex, true, sessionId);
           
           // 播放音频
           await audioRef.current.play();
+          setIsAudioLoading(false);
           return true;
         }
         
@@ -476,7 +591,9 @@ const TTSReader = () => {
       // 如果尝试超过次数限制，返回失败
       return false;
     } catch (error) {
-      console.error("获取块音频失败:", error);
+      if (!isAbortError(error)) {
+        console.error("获取块音频失败:", error);
+      }
       return false;
     }
   };
@@ -486,10 +603,7 @@ const TTSReader = () => {
     for (const [index, item] of audioCache.current.entries()) {
       // 如果是数字索引（非块缓存），且超出缓存范围
       if (typeof index === 'number' && (index < currentIndex - 5 || index > currentIndex + poolSize)) {
-        if (item.audio) {
-          item.audio.pause();
-          item.audio.src = '';
-        }
+        releaseAudio(item.audio, item.url);
         audioCache.current.delete(index);
       }
       
@@ -499,10 +613,7 @@ const TTSReader = () => {
         const sentenceIndex = parseInt(index.split('_chunk_')[0]);
         // 如果超出缓存范围
         if (sentenceIndex < currentIndex - 5 || sentenceIndex > currentIndex + poolSize) {
-          if (item.audio) {
-            item.audio.pause();
-            item.audio.src = '';
-          }
+          releaseAudio(item.audio, item.url);
           audioCache.current.delete(index);
         }
       }
@@ -516,6 +627,8 @@ const TTSReader = () => {
     if (documentHtml && sentences.length > 0) {
       updateHighlightedHtml()
     }
+  // updateHighlightedHtml 只依赖上面的状态，单独列函数会让 effect 每次 render 都触发。
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [documentHtml, sentences, currentSentenceIndex, mounted])
 
   // 高亮显示当前朗读的句子
@@ -534,8 +647,7 @@ const TTSReader = () => {
     // 高亮当前句子
     const highlightedContent = highlightSentenceInHtml(
       documentHtml, 
-      currentSentence, 
-      textNodesRef.current
+      currentSentence
     )
     
     setHighlightedHtml(highlightedContent)
@@ -545,26 +657,13 @@ const TTSReader = () => {
   const handleFileUpload = async (selectedFile: File) => {
     if (!mounted || !mammothLoaded || !mammothRef.current) return
 
-    setFile(selectedFile)
     setIsLoading(true)
     
     // 重置播放状态
-    setIsPlaying(false)
+    setPlayingState(false)
     setCurrentSentenceIndex(0)
     currentIndexRef.current = 0 // 同时更新ref
-    if (audioRef.current) {
-      audioRef.current.pause()
-      audioRef.current = null
-    }
-    
-    // 清理所有缓存的音频
-    audioCache.current.forEach(item => {
-      if (item.audio) {
-        item.audio.pause();
-        item.audio.src = '';
-      }
-    });
-    audioCache.current.clear();
+    stopPlaybackAndClearCache();
 
     try {
       // 使用mammoth.js解析Word文档
@@ -598,6 +697,10 @@ const TTSReader = () => {
   // 处理API端点变更
   const handleApiEndpointChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const newEndpoint = e.target.value;
+    if (newEndpoint !== apiEndpoint) {
+      setPlayingState(false);
+      stopPlaybackAndClearCache();
+    }
     setApiEndpoint(newEndpoint);
     if (typeof window !== 'undefined') {
       try {
@@ -607,25 +710,56 @@ const TTSReader = () => {
       }
     }
   };
+
+  const handleVoiceChange = (voice: string) => {
+    if (voice !== selectedVoice) {
+      setPlayingState(false);
+      stopPlaybackAndClearCache();
+      setSelectedVoice(voice);
+      try {
+        localStorage.setItem("ttsVoice", voice);
+      } catch (error) {
+        console.error("保存语音设置失败:", error);
+      }
+    }
+  };
+
+  const handleStyleChange = (style: string) => {
+    if (style !== selectedStyle) {
+      setPlayingState(false);
+      stopPlaybackAndClearCache();
+      setSelectedStyle(style);
+      try {
+        localStorage.setItem("ttsStyle", style);
+      } catch (error) {
+        console.error("保存语音风格设置失败:", error);
+      }
+    }
+  };
+
+  const handlePlaybackRateChange = (rate: number) => {
+    setPlaybackRate(rate);
+  };
   
   // 切换播放/暂停
   const handleTogglePlayback = () => {
     // 使用本地变量记录新状态，以避免闭包中使用旧状态
-    const newPlayingState = !isPlaying;
+    const newPlayingState = !isPlayingRef.current;
     
     // 设置播放状态
-    setIsPlaying(newPlayingState);
+    setPlayingState(newPlayingState);
     
     if (newPlayingState) {
+      const sessionId = beginPlaybackSession();
       // 确保使用最新的速率设置
       syncPlaybackRateFromLocalStorage();
       // 如果切换到播放状态，使用playback机制播放当前句子
-      playCurrentSentence(true);
+      playCurrentSentence(true, sessionId);
     } else {
       // 如果切换到停止状态，暂停当前播放的音频
-      if (audioRef.current) {
-        audioRef.current.pause();
-      }
+      invalidatePlaybackSession();
+      stopCurrentAudio(false);
+      setIsAudioLoading(false);
     }
   };
   
@@ -636,20 +770,22 @@ const TTSReader = () => {
       const newIndex = currentSentenceIndex - 1;
       
       // 暂停当前音频
-      if (audioRef.current) {
-        audioRef.current.pause();
-      }
+      const sessionId = beginPlaybackSession();
+      stopCurrentAudio(true);
       
       // 更新索引
       setCurrentSentenceIndex(newIndex);
       currentIndexRef.current = newIndex; // 同时更新ref
+      setPlayingState(true);
       
       // 确保使用最新的速率设置
       syncPlaybackRateFromLocalStorage();
       
       // 延迟后播放
       setTimeout(() => {
-        playCurrentSentence(true);
+        if (isPlaybackSessionActive(sessionId)) {
+          playCurrentSentence(true, sessionId);
+        }
       }, 50);
     }
   };
@@ -661,30 +797,33 @@ const TTSReader = () => {
       const newIndex = currentSentenceIndex + 1;
       
       // 暂停当前音频
-      if (audioRef.current) {
-        audioRef.current.pause();
-      }
+      const sessionId = beginPlaybackSession();
+      stopCurrentAudio(true);
       
       // 更新索引
       setCurrentSentenceIndex(newIndex);
       currentIndexRef.current = newIndex; // 同时更新ref
+      setPlayingState(true);
       
       // 确保使用最新的速率设置
       syncPlaybackRateFromLocalStorage();
       
       // 延迟后播放
       setTimeout(() => {
-        playCurrentSentence(true);
+        if (isPlaybackSessionActive(sessionId)) {
+          playCurrentSentence(true, sessionId);
+        }
       }, 50);
     }
   };
   
   // 处理进度条变化
   const handleProgressChange = (newIndex: number) => {
+    const shouldContinuePlaying = isPlayingRef.current;
+    const sessionId = shouldContinuePlaying ? beginPlaybackSession() : playbackSessionRef.current;
+
     // 暂停当前音频
-    if (audioRef.current) {
-      audioRef.current.pause();
-    }
+    stopCurrentAudio(true);
     
     // 更新索引
     setCurrentSentenceIndex(newIndex);
@@ -694,9 +833,11 @@ const TTSReader = () => {
     syncPlaybackRateFromLocalStorage();
     
     // 如果正在播放，则在新位置继续播放
-    if (isPlaying) {
+    if (shouldContinuePlaying) {
       setTimeout(() => {
-        playCurrentSentence(true);
+        if (isPlaybackSessionActive(sessionId)) {
+          playCurrentSentence(true, sessionId);
+        }
       }, 50);
     } else {
       // 如果不是播放状态，仅更新高亮，不加载音频
@@ -708,12 +849,9 @@ const TTSReader = () => {
   const syncPlaybackRateFromLocalStorage = () => {
     if (typeof window !== 'undefined') {
       try {
-        const savedRate = localStorage.getItem('ttsPlaybackRate');
-        if (savedRate) {
-          const newRate = parseFloat(parseFloat(savedRate).toFixed(1));
-          if (newRate !== playbackRate) {
-            setPlaybackRate(newRate);
-          }
+        const newRate = getSavedPlaybackRate();
+        if (newRate !== playbackRate) {
+          setPlaybackRate(newRate);
         }
       } catch (error) {
         console.error("读取播放速率设置失败:", error);
@@ -722,22 +860,29 @@ const TTSReader = () => {
   };
   
   // 播放当前句子
-  const playCurrentSentence = async (forcePlay: boolean = false) => {
+  const playCurrentSentence = async (
+    forcePlay: boolean = false,
+    sessionId: number = playbackSessionRef.current
+  ) => {
     // 确保使用最新的速率设置
     syncPlaybackRateFromLocalStorage();
+
+    if (!isPlaybackSessionActive(sessionId)) {
+      return false;
+    }
     
     // 如果没有句子或已暂停状态且没有强制播放，则返回
     if (sentences.length === 0) {
       return false;
     }
     
-    if (!isPlaying && !forcePlay) {
+    if (!isPlayingRef.current && !forcePlay) {
       return false;
     }
     
     // 强制播放时，确保播放状态为true
-    if (forcePlay && !isPlaying) {
-      setIsPlaying(true);
+    if (forcePlay && !isPlayingRef.current) {
+      setPlayingState(true);
     }
     
     // 使用ref中的索引确保获取最新值
@@ -759,17 +904,19 @@ const TTSReader = () => {
         currentIndexRef.current = nextIndex; // 同时更新ref
         
         // 确保播放状态正确
-        if (!isPlaying) {
-          setIsPlaying(true);
+        if (!isPlayingRef.current) {
+          setPlayingState(true);
         }
         
         // 延迟播放下一句
         setTimeout(() => {
-          playCurrentSentence(true);
+          if (isPlaybackSessionActive(sessionId)) {
+            playCurrentSentence(true, sessionId);
+          }
         }, 50);
       } else {
         // 已到最后一句，停止播放
-        setIsPlaying(false);
+        setPlayingState(false);
       }
       
       return true;
@@ -778,13 +925,13 @@ const TTSReader = () => {
     // 检查文本长度是否超过150字，如果超过则拆分处理
     if (currentSentence.text.length > 150) {
       // 将长句拆分成较短的段落
-      const textChunks = [];
+      const textChunks: string[] = [];
       const fullText = currentSentence.text;
       
       // 优化的分段逻辑：先尝试按标点符号分割，再按需按字符数分割
       // 支持更多的中英文标点符号
       const punctuationRegex = /[，。！？；：、,.!?;:|，。！？；：、,.!?;:|""''""''【】\[\]()（）]/g;
-      let matches = [...fullText.matchAll(punctuationRegex)];
+      const matches = [...fullText.matchAll(punctuationRegex)];
       
       // 确保标点位置按索引排序
       matches.sort((a, b) => (a.index || 0) - (b.index || 0));
@@ -904,21 +1051,27 @@ const TTSReader = () => {
           });
           
           // 开始加载第一个文本块
-          await fetchTTSAudio(finalChunks[0], sentenceIndex, 0);
+          await fetchTTSAudio(finalChunks[0], sentenceIndex, 0, sessionId);
           
           // 预加载所有后续文本块（而不只是第二块）
-          if (finalChunks.length > 1 && (isPlaying || forcePlay)) {
+          if (finalChunks.length > 1 && (isPlayingRef.current || forcePlay)) {
             // 使用Promise.all并行加载所有后续块，提高加载效率
             const preloadPromises = finalChunks.slice(1).map((chunk, index) => {
               // 使用setTimeout引入轻微延迟，避免同时发起太多请求
               return new Promise<void>(resolve => {
                 setTimeout(async () => {
                   try {
+                    if (!isPlaybackSessionActive(sessionId)) {
+                      resolve();
+                      return;
+                    }
                     const chunkIndex = index + 1; // 因为我们从第二块开始（索引1）
-                    await fetchTTSAudio(chunk, sentenceIndex, chunkIndex);
+                    await fetchTTSAudio(chunk, sentenceIndex, chunkIndex, sessionId);
                     resolve();
                   } catch (err) {
-                    console.error(`预加载文本块${index + 1}失败:`, err);
+                    if (!isAbortError(err)) {
+                      console.error(`预加载文本块${index + 1}失败:`, err);
+                    }
                     resolve(); // 即使失败也resolve，避免阻塞其他请求
                   }
                 }, index * 50); // 每个请求间隔50ms，避免同时发起太多请求
@@ -932,36 +1085,30 @@ const TTSReader = () => {
           }
           
           // 等待第一个块准备好并播放
-          const firstChunkKey = `${sentenceIndex}_chunk_0`;
           let attempts = 0;
           
           while (attempts < 20) {
+            if (!isPlaybackSessionActive(sessionId) || !isPlayingRef.current) {
+              return false;
+            }
+
             // 检查主缓存项
             const cachedItem = audioCache.current.get(sentenceIndex);
             if (cachedItem && cachedItem.status === 'ready' && cachedItem.audio) {
-              if (audioRef.current) {
-                audioRef.current.pause();
-              }
+              stopCurrentAudio(false);
               
               audioRef.current = cachedItem.audio;
+              resetAudioPosition(audioRef.current);
               
               // 确保应用正确的播放速率
-              try {
-                const savedRate = localStorage.getItem('ttsPlaybackRate');
-                if (savedRate) {
-                  audioRef.current.playbackRate = parseFloat(parseFloat(savedRate).toFixed(1));
-                } else {
-                  audioRef.current.playbackRate = playbackRate;
-                }
-              } catch (error) {
-                audioRef.current.playbackRate = playbackRate;
-              }
+              applySavedPlaybackRate(audioRef.current);
               
               // 设置播放结束事件 - 标记为文本块
-              setupAudioEndEvent(audioRef.current, sentenceIndex, true);
+              setupAudioEndEvent(audioRef.current, sentenceIndex, true, sessionId);
               
               // 播放音频
               await audioRef.current.play();
+              setIsAudioLoading(false);
               return true;
             }
             
@@ -975,6 +1122,10 @@ const TTSReader = () => {
           audioCache.current.delete(sentenceIndex);
           // 继续执行下面的正常处理代码
         } catch (err) {
+          if (isAbortError(err)) {
+            return false;
+          }
+
           console.error(`处理分段句子失败:`, err);
           // 回退到普通处理
           audioCache.current.delete(sentenceIndex);
@@ -984,7 +1135,7 @@ const TTSReader = () => {
     
     // 正常处理（非分段或分段失败后的回退）
     // 只有在真正播放时才触发预加载
-    if (isPlaying || forcePlay) {
+    if (isPlayingRef.current || forcePlay) {
       // 预加载当前句子
       const cachedItem = audioCache.current.get(sentenceIndex);
       
@@ -1002,15 +1153,18 @@ const TTSReader = () => {
             ? currentSentence.text.substring(0, 150) 
             : currentSentence.text;
           
-          await fetchTTSAudio(text, sentenceIndex);
+          await fetchTTSAudio(text, sentenceIndex, undefined, sessionId);
         } catch (err) {
+          if (isAbortError(err)) {
+            return false;
+          }
           console.error(`加载当前句子失败:`, err);
         }
       }
       
       // 预加载后续句子（只在播放状态下）
-      if (isPlaying) {
-        preloadSentences(sentenceIndex + 1);
+      if (isPlayingRef.current) {
+        preloadSentences(sentenceIndex + 1, sessionId);
       }
     }
     
@@ -1020,31 +1174,23 @@ const TTSReader = () => {
     // 如果有缓存项并且是就绪状态
     if (cachedItem && cachedItem.status === 'ready' && cachedItem.audio) {
       // 使用缓存的音频，无需加载
-      if (audioRef.current) {
-        audioRef.current.pause();
-      }
+      stopCurrentAudio(false);
       
       // 更新引用并设置播放速率
       audioRef.current = cachedItem.audio;
+      resetAudioPosition(audioRef.current);
       
       // 确保应用正确的播放速率
-      try {
-        const savedRate = localStorage.getItem('ttsPlaybackRate');
-        if (savedRate) {
-          audioRef.current.playbackRate = parseFloat(parseFloat(savedRate).toFixed(1));
-        } else {
-          audioRef.current.playbackRate = playbackRate;
-        }
-      } catch (error) {
-        audioRef.current.playbackRate = playbackRate;
-      }
+      applySavedPlaybackRate(audioRef.current);
       
       // 设置播放结束事件
-      setupAudioEndEvent(audioRef.current, sentenceIndex);
+      setupAudioEndEvent(audioRef.current, sentenceIndex, false, sessionId);
       
       // 播放音频
       try {
+        if (!isPlaybackSessionActive(sessionId) || !isPlayingRef.current) return false;
         await audioRef.current.play();
+        setIsAudioLoading(false);
         return true;
       } catch (error) {
         console.error("播放缓存音频失败:", error);
@@ -1060,22 +1206,27 @@ const TTSReader = () => {
       // 等待缓存项准备好
       let attempts = 0;
       while (attempts < 20) { // 增加等待尝试次数
+        if (!isPlaybackSessionActive(sessionId) || !isPlayingRef.current) {
+          setIsAudioLoading(false);
+          return false;
+        }
+
         await new Promise(resolve => setTimeout(resolve, 100));
         attempts++;
         
         const item = audioCache.current.get(sentenceIndex);
         if (item && item.status === 'ready' && item.audio) {
-          if (audioRef.current) {
-            audioRef.current.pause();
-          }
+          stopCurrentAudio(false);
           
           audioRef.current = item.audio;
+          resetAudioPosition(audioRef.current);
           
           // 设置播放结束事件
-          setupAudioEndEvent(audioRef.current, sentenceIndex);
+          setupAudioEndEvent(audioRef.current, sentenceIndex, false, sessionId);
           
           // 播放音频
           try {
+            if (!isPlaybackSessionActive(sessionId) || !isPlayingRef.current) return false;
             await audioRef.current.play();
             setIsAudioLoading(false);
             return true;
@@ -1100,21 +1251,25 @@ const TTSReader = () => {
     
     try {
       // 获取音频URL
-      const audioUrl = await fetchTTSAudio(currentSentence.text, sentenceIndex);
+      const audioUrl = await fetchTTSAudio(currentSentence.text, sentenceIndex, undefined, sessionId);
       
       // 等待缓存项准备好
       let attempts = 0;
       while (attempts < 10) {
+        if (!isPlaybackSessionActive(sessionId) || !isPlayingRef.current) {
+          setIsAudioLoading(false);
+          return false;
+        }
+
         const item = audioCache.current.get(sentenceIndex);
         if (item && item.status === 'ready' && item.audio) {
-          if (audioRef.current) {
-            audioRef.current.pause();
-          }
+          stopCurrentAudio(false);
           
           audioRef.current = item.audio;
+          resetAudioPosition(audioRef.current);
           
           // 设置播放结束事件
-          setupAudioEndEvent(audioRef.current, sentenceIndex);
+          setupAudioEndEvent(audioRef.current, sentenceIndex, false, sessionId);
           
           // 播放音频
           await audioRef.current.play();
@@ -1129,41 +1284,39 @@ const TTSReader = () => {
       }
       
       // 如果缓存项未准备好，则创建新的音频对象
-      if (audioRef.current) {
-        audioRef.current.pause();
-      }
+      stopCurrentAudio(false);
       
       const audio = new Audio(audioUrl);
       audioRef.current = audio;
       
       // 设置播放速率
-      try {
-        const savedRate = localStorage.getItem('ttsPlaybackRate');
-        if (savedRate) {
-          audio.playbackRate = parseFloat(parseFloat(savedRate).toFixed(1));
-        } else {
-          audio.playbackRate = playbackRate;
-        }
-      } catch (error) {
-        audio.playbackRate = playbackRate;
-      }
+      applySavedPlaybackRate(audio);
       
       // 设置播放结束事件
-      setupAudioEndEvent(audio, sentenceIndex);
+      setupAudioEndEvent(audio, sentenceIndex, false, sessionId);
       
       // 加载完成事件
       audio.onloadeddata = () => {
+        if (!isPlaybackSessionActive(sessionId)) {
+          releaseAudio(audio);
+          return;
+        }
         setIsAudioLoading(false);
       };
       
       // 播放音频
+      if (!isPlaybackSessionActive(sessionId) || !isPlayingRef.current) return false;
       await audio.play();
       
       return true;
     } catch (error) {
+      if (isAbortError(error)) {
+        setIsAudioLoading(false);
+        return false;
+      }
       console.error('TTS处理错误:', error);
       setIsAudioLoading(false);
-      setIsPlaying(false);
+      setPlayingState(false);
       return false;
     }
   };
@@ -1202,11 +1355,14 @@ const TTSReader = () => {
               </div>
               <div className="w-1/2">
                 {/* 设置组件 - 移动端 */}
-                <SettingsPanel 
-                  voices={AVAILABLE_VOICES}
-                  selectedVoice={selectedVoice}
-                  onVoiceChange={setSelectedVoice}
-                />
+                  <SettingsPanel 
+                    voices={AVAILABLE_TTS_VOICES}
+                    styles={AVAILABLE_TTS_STYLES}
+                    selectedVoice={selectedVoice}
+                    selectedStyle={selectedStyle}
+                    onVoiceChange={handleVoiceChange}
+                    onStyleChange={handleStyleChange}
+                  />
               </div>
             </div>
             
@@ -1223,11 +1379,14 @@ const TTSReader = () => {
 
               <div className="flex-1">
                 {/* 设置组件 - 桌面端 */}
-            <SettingsPanel 
-              voices={AVAILABLE_VOICES}
-              selectedVoice={selectedVoice}
-              onVoiceChange={setSelectedVoice}
-            />
+                <SettingsPanel 
+                  voices={AVAILABLE_TTS_VOICES}
+                  styles={AVAILABLE_TTS_STYLES}
+                  selectedVoice={selectedVoice}
+                  selectedStyle={selectedStyle}
+                  onVoiceChange={handleVoiceChange}
+                  onStyleChange={handleStyleChange}
+                />
               </div>
             </div>
           </div>
@@ -1259,14 +1418,16 @@ const TTSReader = () => {
                       <div className="space-y-3 md:space-y-5 lg:space-y-6">
                         <div className="space-y-1 md:space-y-2">
                           <label className="text-sm md:text-base font-medium">TTS API 端点</label>
-                        <input
+                          <input
                           type="text"
                             className="w-full p-1.5 md:p-2 lg:p-3 border rounded-md text-sm md:text-base bg-gray-50 dark:bg-gray-800"
-                          placeholder="https://your-tts-api.com/synthesize"
+                          placeholder={DEFAULT_TTS_API_ENDPOINT}
                           value={apiEndpoint}
                           onChange={handleApiEndpointChange}
                         />
-                          <p className="text-xs md:text-sm text-muted-foreground mt-1 md:mt-2">设置将自动保存</p>
+                          <p className="text-xs md:text-sm text-muted-foreground mt-1 md:mt-2">
+                            使用兼容 OpenAI TTS 的 /v1/audio/speech 端点，设置将自动保存
+                          </p>
                       </div>
                       
                         {/* <div className="space-y-1 md:space-y-2">
@@ -1300,7 +1461,7 @@ const TTSReader = () => {
                   onTogglePlay={handleTogglePlayback}
                   onPrevious={handlePreviousSentence}
                   onNext={handleNextSentence}
-                  onPlaybackRateChange={setPlaybackRate}
+                  onPlaybackRateChange={handlePlaybackRateChange}
                   onProgressChange={handleProgressChange}
                 />
                 </div>
