@@ -1,9 +1,14 @@
-// 定义句子类型，包含文本内容和在文档中的位置信息
+// 定义文本节点中的位置，用于定位跨标签的句子范围
+export interface TextNodePosition {
+  nodeIndex: number
+  offset: number
+}
+
+// 定义句子类型，包含文本内容和在文档中的范围信息
 export interface Sentence {
   text: string
-  nodeIndex: number // 文本节点在文档中的索引
-  startOffset: number // 句子在文本节点中的起始位置
-  endOffset: number // 句子在文本节点中的结束位置
+  start: TextNodePosition
+  end: TextNodePosition
 }
 
 // 定义可用语音类型
@@ -25,4 +30,5 @@ export interface TTSRequestOptions {
   volume?: string
   style?: string
   signal?: AbortSignal
+  timeoutMs?: number
 }

@@ -24,21 +24,18 @@ alwaysApply: false
 
 - **lib/** - 核心库和工具函数
   - [textProcessor.ts](mdc:lib/textProcessor.ts) - 文本处理工具
-  - [playbackController.ts](mdc:lib/playbackController.ts) - 播放控制逻辑
   - [ttsAPI.ts](mdc:lib/ttsAPI.ts) - TTS API封装
+  - [persistentAudioCache.ts](mdc:lib/persistentAudioCache.ts) - IndexedDB 音频缓存封装
+  - [ttsOptions.ts](mdc:lib/ttsOptions.ts) - TTS 默认端点、语音和风格选项
   - [types.ts](mdc:lib/types.ts) - 类型定义
   - [utils.ts](mdc:lib/utils.ts) - 通用工具函数
 
-- **hooks/** - 自定义React Hooks
-  - [use-mobile.tsx](mdc:hooks/use-mobile.tsx) - 移动设备检测Hook
-  - [use-toast.ts](mdc:hooks/use-toast.ts) - Toast通知Hook
-
 ## 技术栈
 
-- Next.js - React框架
+- Next.js 16 - React框架
 - TypeScript - 类型安全
 - Tailwind CSS - 样式系统
 - Shadcn UI - UI组件库
 - Mammoth - Word文档到HTML转换库
-
+- DOMPurify - HTML 清理
 

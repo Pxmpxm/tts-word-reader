@@ -9,9 +9,18 @@ import { PlaybackControls } from "@/components/PlaybackControls"
 import { SettingsPanel } from "@/components/SettingsPanel"
 import { ThemeToggle } from "@/components/ui/theme-toggle"
 import { ScrollArea } from "@/components/ui/scroll-area"
+import { Button } from "@/components/ui/button"
+import { Switch } from "@/components/ui/switch"
 
 import { extractSentencesFromHtml, highlightSentenceInHtml } from "@/lib/textProcessor"
 import { generateSpeechBlob } from "@/lib/ttsAPI"
+import {
+  clearPersistentAudioCache,
+  closePersistentAudioDb,
+  openPersistentAudioDb,
+  readPersistentAudioBlob,
+  writePersistentAudioBlob,
+} from "@/lib/persistentAudioCache"
 import {
   AVAILABLE_TTS_STYLES,
   AVAILABLE_TTS_VOICES,
@@ -51,20 +60,8 @@ interface PreloadQueueItem {
   priority: number;
 }
 
-interface PersistentAudioRecord {
-  key: string;
-  blob: Blob;
-  byteSize: number;
-  createdAt: number;
-  lastUsed: number;
-  apiEndpoint: string;
-  voice: string;
-  style: string;
-  text: string;
-}
-
 const MAX_TTS_TEXT_LENGTH = 150;
-const MIN_SPEAKABLE_TEXT_LENGTH = 6;
+const TTS_REQUEST_TIMEOUT_MS = 20_000;
 const PRELOAD_SENTENCE_COUNT = 8;
 const CACHE_WINDOW_BEFORE = 5;
 const MAX_AUDIO_CACHE_ITEMS = 64;
@@ -74,11 +71,7 @@ const PRELOAD_PRIORITY_CURRENT_CONTINUATION = 0;
 const PRELOAD_PRIORITY_UPCOMING_FIRST_CHUNK = 20;
 const PRELOAD_PRIORITY_CURRENT_REMAINDER = 50;
 const PRELOAD_PRIORITY_UPCOMING_REMAINDER = 100;
-const PERSISTENT_AUDIO_DB_NAME = "tts-word-reader-audio-cache";
-const PERSISTENT_AUDIO_DB_VERSION = 1;
-const PERSISTENT_AUDIO_STORE_NAME = "audio";
-const PERSISTENT_AUDIO_CACHE_MAX_ITEMS = 500;
-const PERSISTENT_AUDIO_CACHE_MAX_BYTES = 300 * 1024 * 1024;
+const TTS_PERSISTENT_CACHE_ENABLED_KEY = "ttsPersistentCacheEnabled";
 const TTS_PUNCTUATION_REGEX = /[，。！？；：、,.!?;:]/g;
 
 // 主组件 - 使用dynamic import强制客户端渲染
@@ -96,6 +89,10 @@ const TTSReader = () => {
   const [apiEndpoint, setApiEndpoint] = useState<string>(DEFAULT_TTS_API_ENDPOINT)
   const [highlightedHtml, setHighlightedHtml] = useState<string>("")
   const [playbackRate, setPlaybackRate] = useState<number>(1.0) // 默认值，客户端加载后再更新
+  const [playbackError, setPlaybackError] = useState<string>("")
+  const [persistentCacheEnabled, setPersistentCacheEnabled] = useState(true)
+  const [isClearingCache, setIsClearingCache] = useState(false)
+  const [cacheActionMessage, setCacheActionMessage] = useState("")
   
   // Refs
   const audioRef = useRef<HTMLAudioElement | null>(null)
@@ -107,8 +104,8 @@ const TTSReader = () => {
   const audioCache = useRef<Map<string, AudioCacheItem>>(new Map()) // 音频缓存
   const preloadQueueRef = useRef<PreloadQueueItem[]>([])
   const activePreloadCountRef = useRef(0)
-  const persistentAudioDbPromiseRef = useRef<Promise<IDBDatabase | null> | null>(null)
   const persistentAudioBlobPromisesRef = useRef<Map<string, Promise<Blob>>>(new Map())
+  const persistentCacheEnabledRef = useRef(true)
   const poolSize = PRELOAD_SENTENCE_COUNT // 预请求池大小
   
   // 浏览器环境检测 - 简化为单个mounted状态
@@ -133,8 +130,12 @@ const TTSReader = () => {
     activeRequestControllersRef.current.clear();
   };
 
-  const beginPlaybackSession = () => {
-    preloadQueueRef.current = [];
+  const beginPlaybackSession = (abortRequests: boolean = true) => {
+    if (abortRequests) {
+      abortActiveRequests();
+    } else {
+      preloadQueueRef.current = [];
+    }
     playbackSessionRef.current += 1;
     return playbackSessionRef.current;
   };
@@ -238,6 +239,10 @@ const TTSReader = () => {
     isPlayingRef.current = isPlaying;
   }, [isPlaying]);
 
+  useEffect(() => {
+    persistentCacheEnabledRef.current = persistentCacheEnabled;
+  }, [persistentCacheEnabled]);
+
   // 监听playbackRate的变化，实时应用到当前音频
   useEffect(() => {
     // 将播放速率保存到localStorage
@@ -281,6 +286,11 @@ const TTSReader = () => {
       }
 
       setPlaybackRate(getSavedPlaybackRate());
+
+      const savedPersistentCacheEnabled = localStorage.getItem(TTS_PERSISTENT_CACHE_ENABLED_KEY);
+      const shouldUsePersistentCache = savedPersistentCacheEnabled !== "false";
+      persistentCacheEnabledRef.current = shouldUsePersistentCache;
+      setPersistentCacheEnabled(shouldUsePersistentCache);
     } catch (error) {
       console.error("加载TTS用户偏好失败:", error);
     }
@@ -315,184 +325,21 @@ const TTSReader = () => {
       releaseAudio(audioRef.current || undefined);
       audioRef.current = null;
       clearAudioCache();
-      persistentAudioDbPromiseRef.current?.then((db) => db?.close());
+      closePersistentAudioDb();
     };
   // 这里只需要组件卸载清理当前 ref 持有的资源。
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
-
-  const openPersistentAudioDb = () => {
-    if (typeof window === "undefined" || !window.indexedDB) {
-      return Promise.resolve(null);
-    }
-
-    if (persistentAudioDbPromiseRef.current) {
-      return persistentAudioDbPromiseRef.current;
-    }
-
-    persistentAudioDbPromiseRef.current = new Promise<IDBDatabase | null>((resolve) => {
-      let request: IDBOpenDBRequest;
-      try {
-        request = window.indexedDB.open(PERSISTENT_AUDIO_DB_NAME, PERSISTENT_AUDIO_DB_VERSION);
-      } catch (error) {
-        console.error("打开 IndexedDB 音频缓存失败:", error);
-        resolve(null);
-        return;
-      }
-
-      request.onupgradeneeded = () => {
-        const db = request.result;
-        const store = db.objectStoreNames.contains(PERSISTENT_AUDIO_STORE_NAME)
-          ? request.transaction?.objectStore(PERSISTENT_AUDIO_STORE_NAME)
-          : db.createObjectStore(PERSISTENT_AUDIO_STORE_NAME, { keyPath: "key" });
-
-        if (store && !store.indexNames.contains("lastUsed")) {
-          store.createIndex("lastUsed", "lastUsed", { unique: false });
-        }
-      };
-
-      request.onsuccess = () => {
-        const db = request.result;
-        db.onversionchange = () => db.close();
-        resolve(db);
-      };
-
-      request.onerror = () => {
-        console.error("打开 IndexedDB 音频缓存失败:", request.error);
-        resolve(null);
-      };
-
-      request.onblocked = () => {
-        console.warn("IndexedDB 音频缓存升级被其他页面阻塞");
-      };
-    });
-
-    return persistentAudioDbPromiseRef.current;
-  };
-
-  const readPersistentAudioBlob = async (key: string) => {
-    const db = await openPersistentAudioDb();
-    if (!db) return null;
-
-    return new Promise<Blob | null>((resolve) => {
-      const transaction = db.transaction(PERSISTENT_AUDIO_STORE_NAME, "readwrite");
-      const store = transaction.objectStore(PERSISTENT_AUDIO_STORE_NAME);
-      const request = store.get(key);
-
-      request.onsuccess = () => {
-        const record = request.result as PersistentAudioRecord | undefined;
-        if (!record?.blob) {
-          resolve(null);
-          return;
-        }
-
-        record.lastUsed = Date.now();
-        store.put(record);
-        resolve(record.blob);
-      };
-
-      request.onerror = () => {
-        console.error("读取 IndexedDB 音频缓存失败:", request.error);
-        resolve(null);
-      };
-
-      transaction.onerror = () => {
-        console.error("IndexedDB 音频缓存读取事务失败:", transaction.error);
-        resolve(null);
-      };
-    });
-  };
-
-  const prunePersistentAudioCache = async () => {
-    const db = await openPersistentAudioDb();
-    if (!db) return;
-
-    const records = await new Promise<PersistentAudioRecord[]>((resolve) => {
-      const transaction = db.transaction(PERSISTENT_AUDIO_STORE_NAME, "readonly");
-      const store = transaction.objectStore(PERSISTENT_AUDIO_STORE_NAME);
-      const request = store.getAll();
-
-      request.onsuccess = () => {
-        resolve((request.result as PersistentAudioRecord[]) || []);
-      };
-
-      request.onerror = () => {
-        console.error("读取 IndexedDB 音频缓存列表失败:", request.error);
-        resolve([]);
-      };
-    });
-
-    let totalBytes = records.reduce((sum, record) => sum + (record.byteSize || record.blob?.size || 0), 0);
-    let totalItems = records.length;
-    if (totalItems <= PERSISTENT_AUDIO_CACHE_MAX_ITEMS && totalBytes <= PERSISTENT_AUDIO_CACHE_MAX_BYTES) {
-      return;
-    }
-
-    const evictableRecords = [...records].sort((a, b) => (a.lastUsed || 0) - (b.lastUsed || 0));
-
-    await new Promise<void>((resolve) => {
-      const transaction = db.transaction(PERSISTENT_AUDIO_STORE_NAME, "readwrite");
-      const store = transaction.objectStore(PERSISTENT_AUDIO_STORE_NAME);
-
-      for (const record of evictableRecords) {
-        if (totalItems <= PERSISTENT_AUDIO_CACHE_MAX_ITEMS && totalBytes <= PERSISTENT_AUDIO_CACHE_MAX_BYTES) {
-          break;
-        }
-
-        store.delete(record.key);
-        totalItems -= 1;
-        totalBytes -= record.byteSize || record.blob?.size || 0;
-      }
-
-      transaction.oncomplete = () => resolve();
-      transaction.onerror = () => {
-        console.error("清理 IndexedDB 音频缓存失败:", transaction.error);
-        resolve();
-      };
-    });
-  };
-
-  const writePersistentAudioBlob = async (chunk: AudioChunk, blob: Blob) => {
-    const db = await openPersistentAudioDb();
-    if (!db) return;
-
-    const now = Date.now();
-    const record: PersistentAudioRecord = {
-      key: chunk.persistentKey,
-      blob,
-      byteSize: blob.size,
-      createdAt: now,
-      lastUsed: now,
-      apiEndpoint,
-      voice: selectedVoice,
-      style: selectedStyle,
-      text: chunk.text,
-    };
-
-    await new Promise<void>((resolve) => {
-      const transaction = db.transaction(PERSISTENT_AUDIO_STORE_NAME, "readwrite");
-      const store = transaction.objectStore(PERSISTENT_AUDIO_STORE_NAME);
-
-      store.put(record);
-      transaction.oncomplete = () => resolve();
-      transaction.onerror = () => {
-        console.error("写入 IndexedDB 音频缓存失败:", transaction.error);
-        resolve();
-      };
-    });
-
-    prunePersistentAudioCache().catch((error) => {
-      console.error("清理 IndexedDB 音频缓存失败:", error);
-    });
-  };
 
   const loadPersistentAudioBlob = (chunk: AudioChunk, controller: AbortController) => {
     const existingPromise = persistentAudioBlobPromisesRef.current.get(chunk.persistentKey);
     if (existingPromise) return existingPromise;
 
     const promise = (async () => {
-      const persistentBlob = await readPersistentAudioBlob(chunk.persistentKey);
-      if (persistentBlob) return persistentBlob;
+      if (persistentCacheEnabledRef.current) {
+        const persistentBlob = await readPersistentAudioBlob(chunk.persistentKey);
+        if (persistentBlob) return persistentBlob;
+      }
 
       const requestText = chunk.text.slice(0, MAX_TTS_TEXT_LENGTH);
       const audioBlob = await generateSpeechBlob(requestText, selectedVoice, apiEndpoint, {
@@ -501,10 +348,18 @@ const TTSReader = () => {
         volume: "0",
         style: selectedStyle,
         signal: controller.signal,
+        timeoutMs: TTS_REQUEST_TIMEOUT_MS,
       });
 
-      if (!controller.signal.aborted) {
-        writePersistentAudioBlob(chunk, audioBlob).catch((error) => {
+      if (!controller.signal.aborted && persistentCacheEnabledRef.current) {
+        writePersistentAudioBlob({
+          key: chunk.persistentKey,
+          blob: audioBlob,
+          apiEndpoint,
+          voice: selectedVoice,
+          style: selectedStyle,
+          text: chunk.text,
+        }).catch((error) => {
           console.error("写入 IndexedDB 音频缓存失败:", error);
         });
       }
@@ -592,7 +447,7 @@ const TTSReader = () => {
 
   const getSentenceChunks = (sentenceIndex: number): AudioChunk[] => {
     const sentence = sentences[sentenceIndex];
-    if (!sentence || sentence.text.trim().length < MIN_SPEAKABLE_TEXT_LENGTH) return [];
+    if (!sentence || sentence.text.trim().length === 0) return [];
 
     return splitTextIntoTTSChunks(sentence.text).map((text, chunkIndex) => ({
       sentenceIndex,
@@ -1004,6 +859,8 @@ const TTSReader = () => {
     
     // 重置播放状态
     setPlayingState(false)
+    setPlaybackError("")
+    setCacheActionMessage("")
     setCurrentSentenceIndex(0)
     currentIndexRef.current = 0 // 同时更新ref
     stopPlaybackAndClearCache();
@@ -1031,7 +888,7 @@ const TTSReader = () => {
       // 移除之前的自动预加载代码
     } catch (error) {
       console.error("解析Word文档时出错:", error)
-      alert("解析文档失败，请检查文件格式。")
+      setPlaybackError("解析文档失败，请检查文件格式。")
     } finally {
       setIsLoading(false)
     }
@@ -1042,6 +899,7 @@ const TTSReader = () => {
     const newEndpoint = e.target.value;
     if (newEndpoint !== apiEndpoint) {
       setPlayingState(false);
+      setPlaybackError("");
       stopPlaybackAndClearCache();
     }
     setApiEndpoint(newEndpoint);
@@ -1057,6 +915,7 @@ const TTSReader = () => {
   const handleVoiceChange = (voice: string) => {
     if (voice !== selectedVoice) {
       setPlayingState(false);
+      setPlaybackError("");
       stopPlaybackAndClearCache();
       setSelectedVoice(voice);
       try {
@@ -1070,6 +929,7 @@ const TTSReader = () => {
   const handleStyleChange = (style: string) => {
     if (style !== selectedStyle) {
       setPlayingState(false);
+      setPlaybackError("");
       stopPlaybackAndClearCache();
       setSelectedStyle(style);
       try {
@@ -1083,6 +943,41 @@ const TTSReader = () => {
   const handlePlaybackRateChange = (rate: number) => {
     setPlaybackRate(rate);
   };
+
+  const handlePersistentCacheEnabledChange = (enabled: boolean) => {
+    persistentCacheEnabledRef.current = enabled;
+    setPersistentCacheEnabled(enabled);
+    setCacheActionMessage(enabled ? "持久音频缓存已开启" : "持久音频缓存已关闭");
+
+    try {
+      localStorage.setItem(TTS_PERSISTENT_CACHE_ENABLED_KEY, enabled ? "true" : "false");
+    } catch (error) {
+      console.error("保存持久缓存设置失败:", error);
+    }
+  };
+
+  const handleClearPersistentCache = async () => {
+    setIsClearingCache(true);
+    setCacheActionMessage("");
+    setPlaybackError("");
+    setPlayingState(false);
+    stopPlaybackAndClearCache();
+
+    try {
+      await clearPersistentAudioCache();
+      setCacheActionMessage("已清空本机持久音频缓存");
+    } catch (error) {
+      console.error("清空持久音频缓存失败:", error);
+      setCacheActionMessage("清空缓存失败，请稍后重试");
+    } finally {
+      setIsClearingCache(false);
+    }
+  };
+
+  const getReadablePlaybackError = (error: unknown) => {
+    if (error instanceof Error && error.message) return error.message;
+    return "朗读失败，请检查 TTS API 端点或稍后重试。";
+  };
   
   // 切换播放/暂停
   const handleTogglePlayback = () => {
@@ -1093,6 +988,7 @@ const TTSReader = () => {
     setPlayingState(newPlayingState);
     
     if (newPlayingState) {
+      setPlaybackError("");
       const sessionId = beginPlaybackSession();
       // 确保使用最新的速率设置
       syncPlaybackRateFromLocalStorage();
@@ -1100,7 +996,7 @@ const TTSReader = () => {
       playCurrentSentence(true, sessionId);
     } else {
       // 如果切换到停止状态，暂停当前播放的音频
-      invalidatePlaybackSession(false);
+      invalidatePlaybackSession();
       stopCurrentAudio(false);
       setIsAudioLoading(false);
     }
@@ -1115,6 +1011,7 @@ const TTSReader = () => {
       // 暂停当前音频
       const sessionId = beginPlaybackSession();
       stopCurrentAudio(true);
+      setPlaybackError("");
       
       // 更新索引
       setCurrentSentenceIndex(newIndex);
@@ -1142,6 +1039,7 @@ const TTSReader = () => {
       // 暂停当前音频
       const sessionId = beginPlaybackSession();
       stopCurrentAudio(true);
+      setPlaybackError("");
       
       // 更新索引
       setCurrentSentenceIndex(newIndex);
@@ -1167,6 +1065,7 @@ const TTSReader = () => {
 
     // 暂停当前音频
     stopCurrentAudio(true);
+    setPlaybackError("");
     
     // 更新索引
     setCurrentSentenceIndex(newIndex);
@@ -1271,6 +1170,7 @@ const TTSReader = () => {
       console.error("TTS处理错误:", error);
       setIsAudioLoading(false);
       setPlayingState(false);
+      setPlaybackError(getReadablePlaybackError(error));
       return false;
     }
   };
@@ -1379,12 +1279,47 @@ const TTSReader = () => {
                           value={apiEndpoint}
                           onChange={handleApiEndpointChange}
                         />
-                          <p className="text-xs md:text-sm text-muted-foreground mt-1 md:mt-2">
-                            使用兼容 OpenAI TTS 的 /v1/audio/speech 端点，设置将自动保存
+	                          <p className="text-xs md:text-sm text-muted-foreground mt-1 md:mt-2">
+	                            使用兼容 OpenAI TTS 的 /v1/audio/speech 端点，设置将自动保存
+	                          </p>
+	                      </div>
+
+                        <div className="space-y-2 rounded-md border border-gray-200 dark:border-gray-800 p-3 md:p-4">
+                          <div className="flex items-center justify-between gap-3">
+                            <div className="space-y-1">
+                              <label className="text-sm md:text-base font-medium">持久音频缓存</label>
+                              <p className="text-xs md:text-sm text-muted-foreground">
+                                开启后会把生成的音频和对应文本保存在本机浏览器，用于减少重复请求。
+                              </p>
+                            </div>
+                            <Switch
+                              checked={persistentCacheEnabled}
+                              onCheckedChange={handlePersistentCacheEnabledChange}
+                              aria-label="切换持久音频缓存"
+                            />
+                          </div>
+
+                          <p className="text-xs md:text-sm text-muted-foreground">
+                            上传的 Word 文件不会发送到服务器；朗读时，当前句子文本会发送到你配置的 TTS API。
                           </p>
-                      </div>
-                      
-                        {/* <div className="space-y-1 md:space-y-2">
+
+                          <div className="flex flex-wrap items-center gap-2">
+                            <Button
+                              type="button"
+                              variant="outline"
+                              size="sm"
+                              onClick={handleClearPersistentCache}
+                              disabled={isClearingCache}
+                            >
+                              {isClearingCache ? "清空中..." : "清空本机音频缓存"}
+                            </Button>
+                            {cacheActionMessage && (
+                              <span className="text-xs md:text-sm text-muted-foreground">{cacheActionMessage}</span>
+                            )}
+                          </div>
+                        </div>
+
+	                        {/* <div className="space-y-1 md:space-y-2">
                           <label className="text-sm md:text-base font-medium">TTS API 高级设置</label>
                           <p className="text-xs md:text-sm text-muted-foreground">
                           在这里可以添加更多高级设置选项，如语速、音量等控制。
@@ -1414,10 +1349,11 @@ const TTSReader = () => {
                   hasNext={currentSentenceIndex < sentences.length - 1}
                   onTogglePlay={handleTogglePlayback}
                   onPrevious={handlePreviousSentence}
-                  onNext={handleNextSentence}
-                  onPlaybackRateChange={handlePlaybackRateChange}
-                  onProgressChange={handleProgressChange}
-                />
+	                  onNext={handleNextSentence}
+	                  onPlaybackRateChange={handlePlaybackRateChange}
+	                  onProgressChange={handleProgressChange}
+                    errorMessage={playbackError}
+	                />
                 </div>
               </Tabs>
             </Card>

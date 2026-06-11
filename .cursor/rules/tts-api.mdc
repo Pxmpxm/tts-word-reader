@@ -21,51 +21,45 @@ alwaysApply: false
 
 ## TTS API 规格
 
-- 默认端点: `http://193.112.190.60:4399/api/v1/tts/generate`
+- 默认端点: `https://tts-voice-magic.pxmxmp1224.workers.dev/v1/audio/speech`
 - 请求方法: POST
 - 请求体格式:
   ```json
   {
-    "text": "要转换的文本",
-    "voice": "zh-CN-YunjianNeural",
-    "rate": "0%",
-    "pitch": "0Hz",
-    "volume": "0%"
+    "input": "要转换的文本",
+    "voice": "zh-CN-XiaoxiaoNeural",
+    "speed": 1.0,
+    "pitch": "0",
+    "style": "general",
+    "volume": "0"
   }
   ```
-- 响应格式:
-  ```json
-  {
-    "success": true,
-    "data": {
-      "audio": "/path/to/audio.mp3"
-    }
-  }
-  ```
+- 响应格式: 直接返回可播放的音频 Blob，例如 `audio/mpeg`
+- 请求默认带 20 秒超时，并支持通过 `AbortController` 取消
 
 ## 音频缓存机制
 
-主页面组件[app/page.tsx](mdc:app/page.tsx)实现了音频缓存系统:
+主页面组件[app/page.tsx](mdc:app/page.tsx)协调音频播放，[persistentAudioCache.ts](mdc:lib/persistentAudioCache.ts)封装 IndexedDB 持久缓存:
 
 1. 维护一个音频缓存Map (`audioCache`)
 2. 为当前播放位置周围的句子预加载音频
 3. 清理远离当前播放位置的缓存项
-4. 确保播放速率一致性
+4. 可将音频 Blob 写入浏览器 IndexedDB，并在高级设置中关闭或清空
+5. 使用 `lastUsed` 索引按 LRU 方式分批清理持久缓存
 
 ## 相关类型定义
 
 音频相关的类型定义在[lib/types.ts](mdc:lib/types.ts)中:
 
 ```typescript
-// TTS API响应类型
-export interface TTSResponse {
-  success: boolean
-  data?: {
-    audio: string
-  }
-  message?: string
+export interface TTSRequestOptions {
+  speed?: number
+  pitch?: string
+  volume?: string
+  style?: string
+  signal?: AbortSignal
+  timeoutMs?: number
 }
 ```
-
 
 

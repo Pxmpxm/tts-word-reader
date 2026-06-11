@@ -17,6 +17,7 @@ interface PlaybackControlsProps {
   onNext: () => void;
   onPlaybackRateChange: (rate: number) => void;
   onProgressChange: (index: number) => void;
+  errorMessage?: string;
 }
 
 export function PlaybackControls({
@@ -31,7 +32,8 @@ export function PlaybackControls({
   onPrevious,
   onNext,
   onPlaybackRateChange,
-  onProgressChange
+  onProgressChange,
+  errorMessage
 }: PlaybackControlsProps) {
   
   // 创建本地状态跟踪滑块值
@@ -83,11 +85,12 @@ export function PlaybackControls({
               <TooltipTrigger asChild>
                 <Button
                   variant="outline"
-                  size="icon"
-                  onClick={onPrevious}
-                  disabled={!hasPrevious || isLoading}
-                  className="border-gray-300 dark:border-gray-700 w-7 h-7 sm:w-8 sm:h-8 md:w-10 md:h-10 lg:w-12 lg:h-12 rounded-full transition-all duration-300 hover:scale-105 active:scale-95 hover:bg-gray-100 dark:hover:bg-gray-800"
-                >
+	                  size="icon"
+	                  onClick={onPrevious}
+	                  disabled={!hasPrevious}
+                    aria-label="上一句"
+	                  className="border-gray-300 dark:border-gray-700 w-7 h-7 sm:w-8 sm:h-8 md:w-10 md:h-10 lg:w-12 lg:h-12 rounded-full transition-all duration-300 hover:scale-105 active:scale-95 hover:bg-gray-100 dark:hover:bg-gray-800"
+	                >
                   <SkipBack className="h-3 w-3 sm:h-4 sm:w-4 md:h-5 md:w-5 lg:h-6 lg:w-6" />
                 </Button>
               </TooltipTrigger>
@@ -101,10 +104,11 @@ export function PlaybackControls({
             <Tooltip>
               <TooltipTrigger asChild>
                 <Button
-                  size="icon"
-                  onClick={handleTogglePlay}
-                  disabled={totalCount === 0 || isLoading}
-                  className={`bg-gradient-to-r ${
+	                  size="icon"
+	                  onClick={handleTogglePlay}
+	                  disabled={totalCount === 0}
+                    aria-label={isLoading ? "取消加载" : isPlaying ? "暂停" : "播放"}
+	                  className={`bg-gradient-to-r ${
                     isPlaying
                       ? "from-red-500 to-orange-500 hover:from-red-600 hover:to-orange-600 shadow-orange-500/40"
                       : "from-blue-600 to-cyan-500 hover:from-blue-700 hover:to-cyan-600 shadow-blue-500/40"
@@ -121,9 +125,9 @@ export function PlaybackControls({
                   )}
                 </Button>
               </TooltipTrigger>
-              <TooltipContent>
-                <p>{isPlaying ? "暂停" : "播放"}</p>
-              </TooltipContent>
+	              <TooltipContent>
+	                <p>{isLoading ? "取消加载" : isPlaying ? "暂停" : "播放"}</p>
+	              </TooltipContent>
             </Tooltip>
           </TooltipProvider>
 
@@ -132,11 +136,12 @@ export function PlaybackControls({
               <TooltipTrigger asChild>
                 <Button
                   variant="outline"
-                  size="icon"
-                  onClick={onNext}
-                  disabled={!hasNext || isLoading}
-                  className="border-gray-300 dark:border-gray-700 w-7 h-7 sm:w-8 sm:h-8 md:w-10 md:h-10 lg:w-12 lg:h-12 rounded-full transition-all duration-300 hover:scale-105 active:scale-95 hover:bg-gray-100 dark:hover:bg-gray-800"
-                >
+	                  size="icon"
+	                  onClick={onNext}
+	                  disabled={!hasNext}
+                    aria-label="下一句"
+	                  className="border-gray-300 dark:border-gray-700 w-7 h-7 sm:w-8 sm:h-8 md:w-10 md:h-10 lg:w-12 lg:h-12 rounded-full transition-all duration-300 hover:scale-105 active:scale-95 hover:bg-gray-100 dark:hover:bg-gray-800"
+	                >
                   <SkipForward className="h-3 w-3 sm:h-4 sm:w-4 md:h-5 md:w-5 lg:h-6 lg:w-6" />
                 </Button>
               </TooltipTrigger>
@@ -170,18 +175,23 @@ export function PlaybackControls({
       </div>
 
       <div>
-        <Slider
-          value={[progressPercentage]}
-          disabled={totalCount <= 1 || isLoading}
-          onValueChange={handleProgressChange}
-          className="cursor-pointer h-1.5 md:h-2 lg:h-3"
-        />
+	        <Slider
+	          value={[progressPercentage]}
+	          disabled={totalCount <= 1}
+	          onValueChange={handleProgressChange}
+	          className="cursor-pointer h-1.5 md:h-2 lg:h-3"
+	        />
         
-        <div className="flex justify-between text-[10px] sm:text-xs md:text-sm text-muted-foreground mt-1 md:mt-2 lg:mt-3">
-          <span>进度: {Math.round(progressPercentage)}%</span>
-          <span>句子: {totalCount > 0 ? currentIndex + 1 : 0} / {totalCount}</span>
-        </div>
-      </div>
+	        <div className="flex justify-between text-[10px] sm:text-xs md:text-sm text-muted-foreground mt-1 md:mt-2 lg:mt-3">
+	          <span>进度: {Math.round(progressPercentage)}%</span>
+	          <span>句子: {totalCount > 0 ? currentIndex + 1 : 0} / {totalCount}</span>
+	        </div>
+          {errorMessage && (
+            <p className="mt-2 rounded-md border border-red-200 bg-red-50 px-2 py-1.5 text-xs text-red-700 dark:border-red-900/60 dark:bg-red-950/40 dark:text-red-200">
+              {errorMessage}
+            </p>
+          )}
+	      </div>
     </div>
   );
 } 

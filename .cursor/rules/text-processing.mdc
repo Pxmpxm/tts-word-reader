@@ -15,12 +15,12 @@ alwaysApply: false
 
 2. **文本提取和句子解析**
    - `extractSentencesFromHtml`函数将HTML解析为句子数组
-   - 使用文本节点遍历和正则表达式识别句子边界
-   - 为每个句子记录其在文档中的位置信息
+   - 先将所有 TextNode 拼接为连续文本，再用 offset 映射回 DOM 节点
+   - 为每个句子记录跨 TextNode 的起止范围，支持跨粗体、斜体、链接等内联标签的句子
 
 3. **句子高亮**
    - `highlightSentenceInHtml`函数在文档中高亮显示当前正在朗读的句子
-   - 动态修改DOM以添加高亮样式
+   - 对句子范围内的一个或多个 TextNode 包裹 `.current-reading`
    - 实现自动滚动到当前句子位置
 
 ## 句子结构
@@ -29,10 +29,9 @@ alwaysApply: false
 
 ```typescript
 export interface Sentence {
-  text: string       // 句子文本内容
-  nodeIndex: number  // 文本节点在文档中的索引
-  startOffset: number // 句子在文本节点中的起始位置
-  endOffset: number  // 句子在文本节点中的结束位置
+  text: string
+  start: { nodeIndex: number; offset: number }
+  end: { nodeIndex: number; offset: number }
 }
 ```
 
@@ -40,11 +39,10 @@ export interface Sentence {
 
 1. **句子分割算法**
    - 使用正则表达式识别句号、问号、感叹号等标点作为句子边界
-   - 处理特殊情况如引号内的标点和缩写中的句点
+   - 处理小数、常见英文缩写和句末引号等特殊情况
 
 2. **文本节点遍历**
-   - 递归遍历HTML DOM树
-   - 提取所有文本节点并记录它们的位置
-   - 构建文本节点索引映射
-
+   - 使用 TreeWalker 遍历 HTML DOM 树
+   - 提取所有文本节点并记录全局文本 offset
+   - 构建全局 offset 到 TextNode offset 的映射
 
