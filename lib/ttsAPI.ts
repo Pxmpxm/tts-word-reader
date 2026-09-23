@@ -36,28 +36,21 @@ export async function generateSpeechBlob(
     volume = "0",
     style = DEFAULT_TTS_STYLE,
     signal,
-    timeoutMs,
   } = options;
 
-  const timeoutController = typeof timeoutMs === "number" && timeoutMs > 0
-    ? new AbortController()
-    : null;
-  let timeoutId: ReturnType<typeof setTimeout> | undefined;
+  const controller = new AbortController();
   let timedOut = false;
+  const abort = () => controller.abort(signal?.reason);
+  if (signal?.aborted) abort();
+  else signal?.addEventListener("abort", abort, { once: true });
+  const timeout = window.setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, 30_000);
 
-  if (timeoutController) {
-    timeoutId = setTimeout(() => {
-      timedOut = true;
-      timeoutController.abort();
-    }, timeoutMs);
-  }
-
-  const fetchSignal = timeoutController
-    ? mergeAbortSignals(signal, timeoutController.signal)
-    : signal;
-  
+  let response: Response;
   try {
-    const response = await fetch(apiEndpoint, {
+    response = await fetch(apiEndpoint, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -70,57 +63,37 @@ export async function generateSpeechBlob(
         style,
         volume,
       }),
-      signal: fetchSignal,
+      signal: controller.signal,
     });
-
-    if (!response.ok) {
-      let message = `TTS API调用失败: ${response.status}`;
-      try {
-        const errorData = await response.json();
-        message = errorData?.error?.message || message;
-      } catch {
-        // 错误响应不一定是JSON。
-      }
-      throw new Error(message);
-    }
-
-    const contentType = response.headers.get('content-type') || '';
-    if (contentType.includes('application/json')) {
-      const data = await response.json();
-      throw new Error(data?.error?.message || 'TTS API未返回音频数据');
-    }
-
-    const audioBlob = await response.blob();
-    if (audioBlob.size === 0) {
-      throw new Error('TTS API返回了空音频');
-    }
-
-    return audioBlob;
   } catch (error) {
-    if (timedOut) {
-      throw new Error(`TTS API请求超时（${Math.round((timeoutMs || 0) / 1000)}秒）`);
-    }
+    if (timedOut) throw new Error("TTS 请求超时，请重试");
     throw error;
   } finally {
-    if (timeoutId) clearTimeout(timeoutId);
+    window.clearTimeout(timeout);
+    signal?.removeEventListener("abort", abort);
   }
-}
-
-function mergeAbortSignals(...signals: Array<AbortSignal | undefined>) {
-  const activeSignals = signals.filter((signal): signal is AbortSignal => Boolean(signal));
-  if (activeSignals.length === 0) return undefined;
-  if (activeSignals.length === 1) return activeSignals[0];
-
-  const controller = new AbortController();
-  const abort = () => controller.abort();
-
-  for (const signal of activeSignals) {
-    if (signal.aborted) {
-      controller.abort();
-      break;
+  
+  if (!response.ok) {
+    let message = `TTS API调用失败: ${response.status}`;
+    try {
+      const errorData = await response.json();
+      message = errorData?.error?.message || message;
+    } catch {
+      // 错误响应不一定是JSON。
     }
-    signal.addEventListener("abort", abort, { once: true });
+    throw new Error(message);
   }
 
-  return controller.signal;
+  const contentType = response.headers.get('content-type') || '';
+  if (contentType.includes('application/json')) {
+    const data = await response.json();
+    throw new Error(data?.error?.message || 'TTS API未返回音频数据');
+  }
+
+  const audioBlob = await response.blob();
+  if (audioBlob.size === 0) {
+    throw new Error('TTS API返回了空音频');
+  }
+
+  return audioBlob;
 }

@@ -7,9 +7,10 @@ interface DocumentViewerProps {
   isLoading: boolean;
   html: string;
   fontSize: number;
+  followReading: boolean;
 }
 
-export function DocumentViewer({ isLoading, html, fontSize }: DocumentViewerProps) {
+export function DocumentViewer({ isLoading, html, fontSize, followReading }: DocumentViewerProps) {
   const documentRef = useRef<HTMLDivElement>(null);
   const sanitizedHtml = useMemo(() => {
     if (!html) return "";
@@ -17,12 +18,13 @@ export function DocumentViewer({ isLoading, html, fontSize }: DocumentViewerProp
     return DOMPurify.sanitize(html, {
       USE_PROFILES: { html: true },
       ADD_ATTR: ["class"],
+      ALLOWED_URI_REGEXP: /^(?:(?:https?|blob):|[^a-z]|[a-z+.-]+(?:[^a-z+.-:]|$))/i,
     });
   }, [html]);
 
   // 当前句子变化时滚动到高亮位置
   useEffect(() => {
-    if (documentRef.current) {
+    if (followReading && documentRef.current) {
       const highlightedElement = documentRef.current.querySelector('.current-reading');
       if (highlightedElement) {
         highlightedElement.scrollIntoView({
@@ -32,11 +34,11 @@ export function DocumentViewer({ isLoading, html, fontSize }: DocumentViewerProp
         });
       }
     }
-  }, [html]);
+  }, [html, followReading]);
 
   return (
-    <div className="mt-1 sm:mt-2 border rounded-lg bg-white dark:bg-gray-900 shadow-inner h-full overflow-hidden transition-all duration-300">
-      <ScrollArea className="h-[calc(100vh-200px)] sm:h-[calc(100vh-220px)] w-full p-2 sm:p-4">
+    <div className="h-full min-h-0 overflow-hidden rounded-lg bg-white dark:bg-gray-900">
+      <ScrollArea className="h-full w-full px-4 py-3 sm:px-8 sm:py-6 lg:px-12">
         {isLoading ? (
           <div className="flex flex-col items-center justify-center h-36 sm:h-48 space-y-2 sm:space-y-3 animate-pulse">
             <Loader2 className="h-6 w-6 sm:h-8 sm:w-8 animate-spin text-blue-500" />
@@ -45,7 +47,7 @@ export function DocumentViewer({ isLoading, html, fontSize }: DocumentViewerProp
         ) : sanitizedHtml ? (
           <div
             ref={documentRef}
-            className="document-content pr-1 sm:pr-2 pb-2 sm:pb-4 animate-in fade-in slide-in-from-bottom-2 duration-500"
+            className="document-content mx-auto max-w-4xl pb-24 animate-in fade-in duration-300"
             style={{ fontSize: `${fontSize}%` }}
             dangerouslySetInnerHTML={{ __html: sanitizedHtml }}
           />
@@ -53,9 +55,9 @@ export function DocumentViewer({ isLoading, html, fontSize }: DocumentViewerProp
           <div className="flex flex-col items-center justify-center h-36 sm:h-48 text-muted-foreground space-y-2 sm:space-y-3 animate-in zoom-in duration-300">
             <FileText className="h-10 w-10 sm:h-12 sm:w-12 text-gray-300 dark:text-gray-600 transition-transform duration-300 hover:scale-110" />
             <div className="text-center max-w-md">
-              <p className="text-sm sm:text-base font-medium text-gray-700 dark:text-gray-300 mb-1">请上传Word文档</p>
+              <p className="text-sm sm:text-base font-medium text-gray-700 dark:text-gray-300 mb-1">打开一个文档开始阅读</p>
               <p className="text-xs sm:text-sm text-muted-foreground">
-                上传文档后，您可以在此预览内容并使用TTS朗读
+                支持 Word、PDF、图片、Markdown 和纯文本
               </p>
             </div>
           </div>

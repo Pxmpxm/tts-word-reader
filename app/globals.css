@@ -80,8 +80,8 @@
 
 /* 文档样式 */
 .document-content {
-  font-family: "Times New Roman", Times, serif;
-  line-height: 1.6;
+  font-family: ui-serif, "Noto Serif CJK SC", "Songti SC", serif;
+  line-height: 1.85;
   width: 100%;
   overflow-wrap: break-word;
   word-break: break-word;

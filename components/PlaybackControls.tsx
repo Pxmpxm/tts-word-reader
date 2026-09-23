@@ -17,7 +17,6 @@ interface PlaybackControlsProps {
   onNext: () => void;
   onPlaybackRateChange: (rate: number) => void;
   onProgressChange: (index: number) => void;
-  errorMessage?: string;
 }
 
 export function PlaybackControls({
@@ -32,17 +31,24 @@ export function PlaybackControls({
   onPrevious,
   onNext,
   onPlaybackRateChange,
-  onProgressChange,
-  errorMessage
+  onProgressChange
 }: PlaybackControlsProps) {
   
   // 创建本地状态跟踪滑块值
   const [sliderValue, setSliderValue] = useState<number>(playbackRate * 10);
+  const progressPercentage = totalCount > 1
+    ? Math.max(0, (currentIndex / (totalCount - 1)) * 100)
+    : 0;
+  const [seekValue, setSeekValue] = useState(progressPercentage);
   
   // 同步外部playbackRate到本地状态
   useEffect(() => {
     setSliderValue(playbackRate * 10);
   }, [playbackRate]);
+
+  useEffect(() => {
+    setSeekValue(progressPercentage);
+  }, [progressPercentage]);
   
   // 处理播放速率变化
   const handlePlaybackRateChange = (value: number[]) => {
@@ -62,7 +68,7 @@ export function PlaybackControls({
   };
   
   // 处理进度条变化
-  const handleProgressChange = (value: number[]) => {
+  const handleProgressCommit = (value: number[]) => {
     if (totalCount <= 0) return;
 
     // 转换进度百分比为索引
@@ -70,13 +76,8 @@ export function PlaybackControls({
     onProgressChange(newIndex);
   };
   
-  // 计算当前进度百分比
-  const progressPercentage = totalCount > 1 
-    ? Math.max(0, (currentIndex / Math.max(1, totalCount - 1)) * 100)
-    : 0;
-
   return (
-    <div className="bg-white dark:bg-gray-900 rounded-b-lg space-y-2 p-2 sm:space-y-3 sm:p-3 md:space-y-4 md:p-4 lg:space-y-5 lg:p-5">
+    <div className="space-y-3 bg-white p-3 dark:bg-gray-900 sm:p-4">
       <div className="grid grid-cols-2 md:flex md:flex-wrap items-center justify-between gap-2 md:gap-3 lg:gap-4">
         {/* 播放控制按钮组 */}
         <div className="flex items-center space-x-1 sm:space-x-2 md:space-x-3 lg:space-x-4">
@@ -85,12 +86,12 @@ export function PlaybackControls({
               <TooltipTrigger asChild>
                 <Button
                   variant="outline"
-	                  size="icon"
-	                  onClick={onPrevious}
-	                  disabled={!hasPrevious}
-                    aria-label="上一句"
-	                  className="border-gray-300 dark:border-gray-700 w-7 h-7 sm:w-8 sm:h-8 md:w-10 md:h-10 lg:w-12 lg:h-12 rounded-full transition-all duration-300 hover:scale-105 active:scale-95 hover:bg-gray-100 dark:hover:bg-gray-800"
-	                >
+                  size="icon"
+                  onClick={onPrevious}
+                  disabled={!hasPrevious}
+                  aria-label="上一句"
+                  className="h-11 w-11 rounded-full border-gray-300 transition-transform hover:scale-105 active:scale-95 dark:border-gray-700"
+                >
                   <SkipBack className="h-3 w-3 sm:h-4 sm:w-4 md:h-5 md:w-5 lg:h-6 lg:w-6" />
                 </Button>
               </TooltipTrigger>
@@ -104,15 +105,15 @@ export function PlaybackControls({
             <Tooltip>
               <TooltipTrigger asChild>
                 <Button
-	                  size="icon"
-	                  onClick={handleTogglePlay}
-	                  disabled={totalCount === 0}
-                    aria-label={isLoading ? "取消加载" : isPlaying ? "暂停" : "播放"}
-	                  className={`bg-gradient-to-r ${
+                  size="icon"
+                  onClick={handleTogglePlay}
+                  disabled={totalCount === 0}
+                  aria-label={isPlaying ? "暂停" : "播放"}
+                  className={`h-12 w-12 rounded-full bg-gradient-to-r ${
                     isPlaying
                       ? "from-red-500 to-orange-500 hover:from-red-600 hover:to-orange-600 shadow-orange-500/40"
                       : "from-blue-600 to-cyan-500 hover:from-blue-700 hover:to-cyan-600 shadow-blue-500/40"
-                  } text-white relative w-8 h-8 sm:w-10 sm:h-10 md:w-12 md:h-12 lg:w-14 lg:h-14 rounded-full shadow-lg transition-all duration-300 hover:scale-105 active:scale-95`}
+                  } relative text-white shadow-lg transition-transform hover:scale-105 active:scale-95`}
                 >
                   {isLoading ? (
                     <div className="absolute inset-0 flex items-center justify-center">
@@ -125,9 +126,9 @@ export function PlaybackControls({
                   )}
                 </Button>
               </TooltipTrigger>
-	              <TooltipContent>
-	                <p>{isLoading ? "取消加载" : isPlaying ? "暂停" : "播放"}</p>
-	              </TooltipContent>
+              <TooltipContent>
+                <p>{isPlaying ? "暂停" : "播放"}</p>
+              </TooltipContent>
             </Tooltip>
           </TooltipProvider>
 
@@ -136,12 +137,12 @@ export function PlaybackControls({
               <TooltipTrigger asChild>
                 <Button
                   variant="outline"
-	                  size="icon"
-	                  onClick={onNext}
-	                  disabled={!hasNext}
-                    aria-label="下一句"
-	                  className="border-gray-300 dark:border-gray-700 w-7 h-7 sm:w-8 sm:h-8 md:w-10 md:h-10 lg:w-12 lg:h-12 rounded-full transition-all duration-300 hover:scale-105 active:scale-95 hover:bg-gray-100 dark:hover:bg-gray-800"
-	                >
+                  size="icon"
+                  onClick={onNext}
+                  disabled={!hasNext}
+                  aria-label="下一句"
+                  className="h-11 w-11 rounded-full border-gray-300 transition-transform hover:scale-105 active:scale-95 dark:border-gray-700"
+                >
                   <SkipForward className="h-3 w-3 sm:h-4 sm:w-4 md:h-5 md:w-5 lg:h-6 lg:w-6" />
                 </Button>
               </TooltipTrigger>
@@ -175,23 +176,19 @@ export function PlaybackControls({
       </div>
 
       <div>
-	        <Slider
-	          value={[progressPercentage]}
-	          disabled={totalCount <= 1}
-	          onValueChange={handleProgressChange}
-	          className="cursor-pointer h-1.5 md:h-2 lg:h-3"
-	        />
+        <Slider
+          value={[seekValue]}
+          disabled={totalCount <= 1}
+          onValueChange={(value) => setSeekValue(value[0])}
+          onValueCommit={handleProgressCommit}
+          className="cursor-pointer h-1.5 md:h-2 lg:h-3"
+        />
         
-	        <div className="flex justify-between text-[10px] sm:text-xs md:text-sm text-muted-foreground mt-1 md:mt-2 lg:mt-3">
-	          <span>进度: {Math.round(progressPercentage)}%</span>
-	          <span>句子: {totalCount > 0 ? currentIndex + 1 : 0} / {totalCount}</span>
-	        </div>
-          {errorMessage && (
-            <p className="mt-2 rounded-md border border-red-200 bg-red-50 px-2 py-1.5 text-xs text-red-700 dark:border-red-900/60 dark:bg-red-950/40 dark:text-red-200">
-              {errorMessage}
-            </p>
-          )}
-	      </div>
+        <div className="flex justify-between text-[10px] sm:text-xs md:text-sm text-muted-foreground mt-1 md:mt-2 lg:mt-3">
+          <span>进度: {Math.round(progressPercentage)}%</span>
+          <span>句子: {totalCount > 0 ? currentIndex + 1 : 0} / {totalCount}</span>
+        </div>
+      </div>
     </div>
   );
 } 

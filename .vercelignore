@@ -1,0 +1,4 @@
+.env
+.env*.local
+.tmp
+备忘录.pdf

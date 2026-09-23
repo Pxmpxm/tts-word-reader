@@ -7,7 +7,7 @@ const inter = Inter({ subsets: ["latin"] })
 
 export const metadata = {
   title: "文档朗读系统",
-  description: "上传Word文档并使用TTS朗读",
+  description: "在浏览器中解析、管理并朗读 Word、PDF、图片和文本资料",
     generator: 'v0.dev'
 }
 
