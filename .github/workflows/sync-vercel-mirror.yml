@@ -1,0 +1,33 @@
+name: Sync Vercel mirror
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sync-vercel-mirror
+  cancel-in-progress: true
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Push to personal repository
+        env:
+          MIRROR_KEY: ${{ secrets.VERCEL_MIRROR_DEPLOY_KEY }}
+        run: |
+          test -n "$MIRROR_KEY"
+          install -m 700 -d "$HOME/.ssh"
+          printf '%s\n' "$MIRROR_KEY" > "$HOME/.ssh/id_ed25519"
+          chmod 600 "$HOME/.ssh/id_ed25519"
+          printf '%s\n' 'github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl' > "$HOME/.ssh/known_hosts"
+          GIT_SSH_COMMAND="ssh -i $HOME/.ssh/id_ed25519 -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes" \
+            git push git@github.com:Pxmpxm/tts-word-reader.git HEAD:refs/heads/main
