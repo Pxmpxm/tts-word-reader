@@ -4,11 +4,10 @@ import { Upload } from "lucide-react"
 
 interface FileUploaderProps {
   isLoading: boolean
-  mammothLoaded: boolean
   onFileUpload: (file: File) => void
 }
 
-export function FileUploader({ isLoading, mammothLoaded, onFileUpload }: FileUploaderProps) {
+export function FileUploader({ isLoading, onFileUpload }: FileUploaderProps) {
   const fileInputId = useId()
   const fileInputRef = useRef<HTMLInputElement>(null)
 
@@ -16,10 +15,6 @@ export function FileUploader({ isLoading, mammothLoaded, onFileUpload }: FileUpl
     const file = event.target.files?.[0]
     event.target.value = ""
     if (!file) return
-    if (file.name.toLowerCase().endsWith(".docx") && !mammothLoaded) {
-      alert("Word 解析器仍在加载，请稍后重试。")
-      return
-    }
     onFileUpload(file)
   }
 

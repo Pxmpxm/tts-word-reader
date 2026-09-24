@@ -6,11 +6,12 @@ import { Loader2, FileText } from "lucide-react";
 interface DocumentViewerProps {
   isLoading: boolean;
   html: string;
+  currentSentenceIndex: number;
   fontSize: number;
   followReading: boolean;
 }
 
-export function DocumentViewer({ isLoading, html, fontSize, followReading }: DocumentViewerProps) {
+export function DocumentViewer({ isLoading, html, currentSentenceIndex, fontSize, followReading }: DocumentViewerProps) {
   const documentRef = useRef<HTMLDivElement>(null);
   const sanitizedHtml = useMemo(() => {
     if (!html) return "";
@@ -18,23 +19,17 @@ export function DocumentViewer({ isLoading, html, fontSize, followReading }: Doc
     return DOMPurify.sanitize(html, {
       USE_PROFILES: { html: true },
       ADD_ATTR: ["class"],
-      ALLOWED_URI_REGEXP: /^(?:(?:https?|blob):|[^a-z]|[a-z+.-]+(?:[^a-z+.-:]|$))/i,
     });
   }, [html]);
 
-  // 当前句子变化时滚动到高亮位置
   useEffect(() => {
-    if (followReading && documentRef.current) {
-      const highlightedElement = documentRef.current.querySelector('.current-reading');
-      if (highlightedElement) {
-        highlightedElement.scrollIntoView({
-          behavior: 'smooth',
-          block: 'center',
-          inline: 'nearest'
-        });
-      }
-    }
-  }, [html, followReading]);
+    const root = documentRef.current
+    if (!root) return
+    root.querySelectorAll(".current-reading").forEach((node) => node.classList.remove("current-reading"))
+    const current = root.querySelectorAll(`[data-reader-sentence="${currentSentenceIndex}"]`)
+    current.forEach((node) => node.classList.add("current-reading"))
+    if (followReading) current[0]?.scrollIntoView({ behavior: "smooth", block: "center", inline: "nearest" })
+  }, [sanitizedHtml, currentSentenceIndex, followReading]);
 
   return (
     <div className="h-full min-h-0 overflow-hidden rounded-lg bg-white dark:bg-gray-900">

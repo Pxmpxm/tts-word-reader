@@ -71,40 +71,43 @@ export function extractSentencesFromHtml(html: string): Sentence[] {
   return sentences
 }
 
-export function highlightSentenceInHtml(documentHtml: string, sentence: Sentence | null) {
-  if (typeof window === "undefined" || !documentHtml || !sentence) return documentHtml
+export function markSentencesInHtml(documentHtml: string, sentences: Sentence[]) {
+  if (typeof document === "undefined" || !documentHtml || sentences.length === 0) return documentHtml
 
-  try {
-    const container = document.createElement("div")
-    container.innerHTML = documentHtml
-    const textNodes: Node[] = []
-    const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT, {
-      acceptNode: (node) => node.textContent?.trim()
-        ? NodeFilter.FILTER_ACCEPT
-        : NodeFilter.FILTER_REJECT,
-    })
-    let node: Node | null
-    while ((node = walker.nextNode())) textNodes.push(node)
+  const container = document.createElement("div")
+  container.innerHTML = documentHtml
+  const nodes: Node[] = []
+  const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT, {
+    acceptNode: (node) => node.textContent?.trim() && !node.parentElement?.closest("script,style")
+      ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT,
+  })
+  let node: Node | null
+  while ((node = walker.nextNode())) nodes.push(node)
 
-    for (const range of [...sentence.ranges].sort((a, b) => b.nodeIndex - a.nodeIndex)) {
-      const textNode = textNodes[range.nodeIndex]
-      const text = textNode?.textContent || ""
-      const start = Math.min(range.startOffset, text.length)
-      const end = Math.min(range.endOffset, text.length)
-      if (!textNode || start >= end) continue
+  const ranges = new Map<number, Array<{ start: number; end: number; sentence: number }>>()
+  sentences.forEach((sentence, index) => sentence.ranges.forEach((range) => {
+    const parts = ranges.get(range.nodeIndex) || []
+    parts.push({ start: range.startOffset, end: range.endOffset, sentence: index })
+    ranges.set(range.nodeIndex, parts)
+  }))
 
-      const fragment = document.createDocumentFragment()
-      if (start > 0) fragment.append(document.createTextNode(text.slice(0, start)))
-      const highlight = document.createElement("span")
-      highlight.className = "current-reading"
-      highlight.textContent = text.slice(start, end)
-      fragment.append(highlight)
-      if (end < text.length) fragment.append(document.createTextNode(text.slice(end)))
-      textNode.parentNode?.replaceChild(fragment, textNode)
+  for (const [index, parts] of ranges) {
+    const textNode = nodes[index]
+    if (!textNode?.parentNode) continue
+    const text = textNode.textContent || ""
+    const fragment = document.createDocumentFragment()
+    let position = 0
+    for (const part of parts.sort((a, b) => a.start - b.start)) {
+      if (part.start < position || part.end > text.length) continue
+      if (part.start > position) fragment.append(document.createTextNode(text.slice(position, part.start)))
+      const span = document.createElement("span")
+      span.dataset.readerSentence = String(part.sentence)
+      span.textContent = text.slice(part.start, part.end)
+      fragment.append(span)
+      position = part.end
     }
-    return container.innerHTML
-  } catch (error) {
-    console.error("高亮句子时出错:", error)
-    return documentHtml
+    if (position < text.length) fragment.append(document.createTextNode(text.slice(position)))
+    textNode.parentNode.replaceChild(fragment, textNode)
   }
+  return container.innerHTML
 }

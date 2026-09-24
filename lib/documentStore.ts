@@ -1,87 +1,86 @@
+import { browserDb } from "./supabase/client"
+
 export interface DocumentAsset {
   path: string
   type: string
-  blob: Blob
+  url: string
 }
 
 export interface StoredDocument {
   id: string
   name: string
   sourceType: "docx" | "text" | "markdown" | "mineru"
-  sourceFile: Blob
+  status: "uploading" | "queued" | "processing" | "saving" | "ready" | "failed"
   html?: string
   markdown?: string
   assets: DocumentAsset[]
+  readingIndex: number
+  error?: string
   createdAt: number
   updatedAt: number
   byteSize: number
 }
 
 export type StoredDocumentSummary = Pick<
-  StoredDocument,
-  "id" | "name" | "sourceType" | "createdAt" | "updatedAt" | "byteSize"
+  StoredDocument, "id" | "name" | "sourceType" | "status" | "createdAt" | "updatedAt" | "byteSize" | "error"
 >
 
-const DB_NAME = "tts-word-reader-documents"
-const DB_VERSION = 1
-const STORE_NAME = "documents"
-
-function openDocumentDb() {
-  return new Promise<IDBDatabase>((resolve, reject) => {
-    const request = indexedDB.open(DB_NAME, DB_VERSION)
-    request.onupgradeneeded = () => {
-      if (!request.result.objectStoreNames.contains(STORE_NAME)) {
-        const store = request.result.createObjectStore(STORE_NAME, { keyPath: "id" })
-        store.createIndex("updatedAt", "updatedAt")
-      }
-    }
-    request.onsuccess = () => resolve(request.result)
-    request.onerror = () => reject(request.error)
-  })
-}
-
-function runRequest<T>(mode: IDBTransactionMode, action: (store: IDBObjectStore) => IDBRequest<T>) {
-  return openDocumentDb().then((db) => new Promise<T>((resolve, reject) => {
-    const transaction = db.transaction(STORE_NAME, mode)
-    const request = action(transaction.objectStore(STORE_NAME))
-    request.onsuccess = () => resolve(request.result)
-    request.onerror = () => reject(request.error)
-    transaction.oncomplete = () => db.close()
-    transaction.onerror = () => reject(transaction.error)
+export async function listDocuments(): Promise<StoredDocumentSummary[]> {
+  const { data, error } = await browserDb().from("documents")
+    .select("id,name,source_type,status,file_size,error,created_at,updated_at")
+    .order("updated_at", { ascending: false })
+  if (error) throw error
+  return (data || []).map((row) => ({
+    id: row.id, name: row.name, sourceType: row.source_type, status: row.status,
+    byteSize: row.file_size, error: row.error || undefined,
+    createdAt: Date.parse(row.created_at), updatedAt: Date.parse(row.updated_at),
   }))
 }
 
-export function saveDocument(document: StoredDocument) {
-  return runRequest("readwrite", (store) => store.put(document))
-}
-
-export function getDocument(id: string) {
-  return runRequest<StoredDocument | undefined>("readonly", (store) => store.get(id))
-}
-
-export async function listDocuments(): Promise<StoredDocumentSummary[]> {
-  const documents = await runRequest<StoredDocument[]>("readonly", (store) => store.getAll())
-  return documents
-    .map(({ id, name, sourceType, createdAt, updatedAt, byteSize }) => ({
-      id,
-      name,
-      sourceType,
-      createdAt,
-      updatedAt,
-      byteSize,
-    }))
-    .sort((a, b) => b.updatedAt - a.updatedAt)
+export async function getDocument(id: string): Promise<StoredDocument | null> {
+  const db = browserDb()
+  const { data: row, error } = await db.from("documents")
+    .select("id,name,source_type,status,file_size,html,markdown,reading_index,error,created_at,updated_at")
+    .eq("id", id).maybeSingle()
+  if (error) throw error
+  if (!row) return null
+  const { data: assetRows, error: assetError } = await db.from("document_assets")
+    .select("path,mime_type,storage_path").eq("document_id", id)
+  if (assetError) throw assetError
+  const images = (assetRows || []).filter((asset) => asset.mime_type.startsWith("image/"))
+  const assets: DocumentAsset[] = []
+  for (let offset = 0; offset < images.length; offset += 100) {
+    const batch = images.slice(offset, offset + 100)
+    const { data: urls, error: urlError } = await db.storage.from("documents")
+      .createSignedUrls(batch.map((asset) => asset.storage_path), 24 * 60 * 60)
+    if (urlError || !urls) throw urlError || new Error("读取文档图片失败")
+    const signed = new Map(urls.map((item) => [item.path, item.signedUrl]))
+    for (const asset of batch) {
+      const url = signed.get(asset.storage_path)
+      if (!url) throw new Error("文档图片地址已失效")
+      assets.push({ path: asset.path, type: asset.mime_type, url })
+    }
+  }
+  return {
+    id: row.id, name: row.name, sourceType: row.source_type, status: row.status,
+    html: row.html || undefined, markdown: row.markdown || undefined, assets,
+    readingIndex: row.reading_index, error: row.error || undefined,
+    byteSize: row.file_size, createdAt: Date.parse(row.created_at), updatedAt: Date.parse(row.updated_at),
+  }
 }
 
 export async function deleteDocuments(ids: string[]) {
-  if (ids.length === 0) return
-  const db = await openDocumentDb()
-  await new Promise<void>((resolve, reject) => {
-    const transaction = db.transaction(STORE_NAME, "readwrite")
-    const store = transaction.objectStore(STORE_NAME)
-    ids.forEach((id) => store.delete(id))
-    transaction.oncomplete = () => resolve()
-    transaction.onerror = () => reject(transaction.error)
-  })
-  db.close()
+  for (const id of ids) {
+    const response = await fetch(`/api/documents/${encodeURIComponent(id)}`, { method: "DELETE" })
+    if (!response.ok) {
+      const result = await response.json().catch(() => ({}))
+      throw new Error(result.error || "删除文档失败")
+    }
+  }
+}
+
+export async function saveReadingIndex(id: string, readingIndex: number) {
+  const { error } = await browserDb().from("documents")
+    .update({ reading_index: readingIndex }).eq("id", id)
+  if (error) throw error
 }

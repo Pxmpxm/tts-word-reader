@@ -22,9 +22,7 @@ export interface TTSStyleOption {
 }
 
 export interface TTSRequestOptions {
-  speed?: number
-  pitch?: string
-  volume?: string
+  documentId?: string
   style?: string
   signal?: AbortSignal
 }
