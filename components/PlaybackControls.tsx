@@ -1,23 +1,42 @@
-import { Button } from "@/components/ui/button";
-import { Slider } from "@/components/ui/slider";
-import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
-import { Play, Pause, SkipBack, SkipForward, Gauge } from "lucide-react";
-import { useEffect, useState } from "react";
+"use client"
+
+import { Button } from "@/components/ui/button"
+import { Slider } from "@/components/ui/slider"
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
+import {
+  Play,
+  Pause,
+  SkipBack,
+  SkipForward,
+  Gauge,
+  Loader2,
+  LocateFixed,
+  Volume2,
+} from "lucide-react"
+import { useEffect, useState } from "react"
+import { cn } from "@/lib/utils"
 
 interface PlaybackControlsProps {
-  isPlaying: boolean;
-  isLoading: boolean;
-  currentIndex: number;
-  totalCount: number;
-  playbackRate: number;
-  hasPrevious: boolean;
-  hasNext: boolean;
-  onTogglePlay: () => void;
-  onPrevious: () => void;
-  onNext: () => void;
-  onPlaybackRateChange: (rate: number) => void;
-  onProgressChange: (index: number) => void;
+  isPlaying: boolean
+  isLoading: boolean
+  currentIndex: number
+  totalCount: number
+  playbackRate: number
+  hasPrevious: boolean
+  hasNext: boolean
+  onTogglePlay: () => void
+  onPrevious: () => void
+  onNext: () => void
+  onPlaybackRateChange: (rate: number) => void
+  onProgressChange: (index: number) => void
+  voiceName?: string
+  onOpenSettings?: () => void
+  followReading?: boolean
+  onToggleFollowReading?: () => void
 }
+
+const SPEED_PRESETS = [0.8, 1.0, 1.2, 1.5, 2.0]
 
 export function PlaybackControls({
   isPlaying,
@@ -31,56 +50,105 @@ export function PlaybackControls({
   onPrevious,
   onNext,
   onPlaybackRateChange,
-  onProgressChange
+  onProgressChange,
+  voiceName,
+  onOpenSettings,
+  followReading,
+  onToggleFollowReading,
 }: PlaybackControlsProps) {
-  
-  // 创建本地状态跟踪滑块值
-  const [sliderValue, setSliderValue] = useState<number>(playbackRate * 10);
+  const [sliderValue, setSliderValue] = useState<number>(playbackRate * 10)
   const progressPercentage = totalCount > 1
     ? Math.max(0, (currentIndex / (totalCount - 1)) * 100)
-    : 0;
-  const [seekValue, setSeekValue] = useState(progressPercentage);
-  
-  // 同步外部playbackRate到本地状态
-  useEffect(() => {
-    setSliderValue(playbackRate * 10);
-  }, [playbackRate]);
+    : 0
+  const [seekValue, setSeekValue] = useState(progressPercentage)
 
   useEffect(() => {
-    setSeekValue(progressPercentage);
-  }, [progressPercentage]);
-  
-  // 处理播放速率变化
-  const handlePlaybackRateChange = (value: number[]) => {
-    // 更新本地滑块状态
-    setSliderValue(value[0]);
-    
-    // 转换为小数并保留一位小数
-    const newRate = parseFloat((value[0] / 10).toFixed(1));
-    
-    // 通知父组件更新速率
-    onPlaybackRateChange(newRate);
-  };
-  
-  // 处理播放/暂停按钮点击
-  const handleTogglePlay = () => {
-    onTogglePlay();
-  };
-  
-  // 处理进度条变化
+    setSliderValue(playbackRate * 10)
+  }, [playbackRate])
+
+  useEffect(() => {
+    setSeekValue(progressPercentage)
+  }, [progressPercentage])
+
+  const handleSpeedSliderChange = (value: number[]) => {
+    setSliderValue(value[0])
+    const newRate = parseFloat((value[0] / 10).toFixed(1))
+    onPlaybackRateChange(newRate)
+  }
+
   const handleProgressCommit = (value: number[]) => {
-    if (totalCount <= 0) return;
+    if (totalCount <= 0) return
+    const newIndex = Math.round((value[0] / 100) * (totalCount - 1))
+    onProgressChange(newIndex)
+  }
 
-    // 转换进度百分比为索引
-    const newIndex = Math.round((value[0] / 100) * (totalCount - 1));
-    onProgressChange(newIndex);
-  };
-  
   return (
-    <div className="space-y-3 bg-white p-3 dark:bg-gray-900 sm:p-4">
-      <div className="grid grid-cols-2 md:flex md:flex-wrap items-center justify-between gap-2 md:gap-3 lg:gap-4">
-        {/* 播放控制按钮组 */}
-        <div className="flex items-center space-x-1 sm:space-x-2 md:space-x-3 lg:space-x-4">
+    <div className="glass-dock relative z-20 w-full border-t bg-card/90 px-3 py-2.5 backdrop-blur-xl sm:px-6 sm:py-3.5">
+      {/* Top interactive progress scrubber */}
+      <div className="group relative -top-3 left-0 right-0 -mb-2 px-1">
+        <Slider
+          value={[seekValue]}
+          disabled={totalCount <= 1}
+          onValueChange={(val) => setSeekValue(val[0])}
+          onValueCommit={handleProgressCommit}
+          className="h-1.5 cursor-pointer py-1 transition-all group-hover:h-2"
+        />
+      </div>
+
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between sm:gap-4">
+        {/* Left info: sentence progress & live equalizer */}
+        <div className="flex items-center gap-3 min-w-0">
+          {/* Animated audio wave equalizer */}
+          <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-primary/10 text-primary shrink-0">
+            {isPlaying ? (
+              <div className="flex items-end gap-0.5 h-4">
+                <span className="w-0.5 rounded-full bg-primary animate-wave-1" />
+                <span className="w-0.5 rounded-full bg-primary animate-wave-2" />
+                <span className="w-0.5 rounded-full bg-primary animate-wave-3" />
+              </div>
+            ) : (
+              <Volume2 className="h-4 w-4 text-muted-foreground" />
+            )}
+          </div>
+
+          <div className="flex items-baseline gap-2 min-w-0">
+            <span className="text-xs sm:text-sm font-semibold text-foreground truncate">
+              {totalCount > 0 ? `第 ${currentIndex + 1} / ${totalCount} 句` : "未加载句子"}
+            </span>
+            <span className="text-[11px] text-muted-foreground font-medium shrink-0">
+              {Math.round(progressPercentage)}%
+            </span>
+          </div>
+
+          {onToggleFollowReading && (
+            <TooltipProvider>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    onClick={onToggleFollowReading}
+                    className={cn(
+                      "h-7 w-7 rounded-lg transition-colors ml-1 hidden sm:inline-flex",
+                      followReading
+                        ? "text-primary bg-primary/10 hover:bg-primary/20"
+                        : "text-muted-foreground hover:text-foreground"
+                    )}
+                    aria-label="跟随朗读滚动"
+                  >
+                    <LocateFixed className="h-3.5 w-3.5" />
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent side="top">
+                  <p>{followReading ? "关闭视图跟随" : "开启视图跟随"}</p>
+                </TooltipContent>
+              </Tooltip>
+            </TooltipProvider>
+          )}
+        </div>
+
+        {/* Center: Core Playback Buttons */}
+        <div className="flex items-center justify-center gap-2 sm:gap-3 order-first sm:order-none">
           <TooltipProvider>
             <Tooltip>
               <TooltipTrigger asChild>
@@ -89,14 +157,14 @@ export function PlaybackControls({
                   size="icon"
                   onClick={onPrevious}
                   disabled={!hasPrevious}
+                  className="h-9 w-9 sm:h-10 sm:w-10 rounded-full border-border/80 bg-background/80 shadow-sm transition-all hover:bg-accent hover:scale-105 active:scale-95 disabled:opacity-40"
                   aria-label="上一句"
-                  className="h-11 w-11 rounded-full border-gray-300 transition-transform hover:scale-105 active:scale-95 dark:border-gray-700"
                 >
-                  <SkipBack className="h-3 w-3 sm:h-4 sm:w-4 md:h-5 md:w-5 lg:h-6 lg:w-6" />
+                  <SkipBack className="h-4 w-4" />
                 </Button>
               </TooltipTrigger>
-              <TooltipContent>
-                <p>上一句</p>
+              <TooltipContent side="top">
+                <p>上一句 (←)</p>
               </TooltipContent>
             </Tooltip>
           </TooltipProvider>
@@ -106,28 +174,27 @@ export function PlaybackControls({
               <TooltipTrigger asChild>
                 <Button
                   size="icon"
-                  onClick={handleTogglePlay}
+                  onClick={onTogglePlay}
                   disabled={totalCount === 0}
-                  aria-label={isPlaying ? "暂停" : "播放"}
-                  className={`h-12 w-12 rounded-full bg-gradient-to-r ${
+                  className={cn(
+                    "relative h-12 w-12 sm:h-13 sm:w-13 rounded-full text-white shadow-lg transition-all hover:scale-105 active:scale-95 disabled:opacity-50",
                     isPlaying
-                      ? "from-red-500 to-orange-500 hover:from-red-600 hover:to-orange-600 shadow-orange-500/40"
-                      : "from-blue-600 to-cyan-500 hover:from-blue-700 hover:to-cyan-600 shadow-blue-500/40"
-                  } relative text-white shadow-lg transition-transform hover:scale-105 active:scale-95`}
+                      ? "bg-gradient-to-br from-amber-500 to-orange-600 shadow-orange-500/30 hover:from-amber-600 hover:to-orange-700 ring-2 ring-orange-400/30"
+                      : "bg-gradient-to-br from-primary to-blue-600 shadow-primary/30 hover:from-primary/90 hover:to-blue-700"
+                  )}
+                  aria-label={isPlaying ? "暂停" : "播放"}
                 >
                   {isLoading ? (
-                    <div className="absolute inset-0 flex items-center justify-center">
-                      <div className="animate-spin h-3 w-3 sm:h-4 sm:w-4 md:h-5 md:w-5 lg:h-6 lg:w-6 border-2 border-white rounded-full border-t-transparent"></div>
-                    </div>
+                    <Loader2 className="h-5 w-5 animate-spin" />
+                  ) : isPlaying ? (
+                    <Pause className="h-5 w-5 fill-current" />
                   ) : (
-                    isPlaying ? 
-                      <Pause className="h-3 w-3 sm:h-4 sm:w-4 md:h-5 md:w-5 lg:h-6 lg:w-6" /> : 
-                      <Play className="h-3 w-3 sm:h-4 sm:w-4 md:h-5 md:w-5 lg:h-6 lg:w-6 ml-0.5" />
+                    <Play className="h-5 w-5 ml-0.5 fill-current" />
                   )}
                 </Button>
               </TooltipTrigger>
-              <TooltipContent>
-                <p>{isPlaying ? "暂停" : "播放"}</p>
+              <TooltipContent side="top">
+                <p>{isPlaying ? "暂停 (空格)" : "播放 (空格)"}</p>
               </TooltipContent>
             </Tooltip>
           </TooltipProvider>
@@ -140,55 +207,94 @@ export function PlaybackControls({
                   size="icon"
                   onClick={onNext}
                   disabled={!hasNext}
+                  className="h-9 w-9 sm:h-10 sm:w-10 rounded-full border-border/80 bg-background/80 shadow-sm transition-all hover:bg-accent hover:scale-105 active:scale-95 disabled:opacity-40"
                   aria-label="下一句"
-                  className="h-11 w-11 rounded-full border-gray-300 transition-transform hover:scale-105 active:scale-95 dark:border-gray-700"
                 >
-                  <SkipForward className="h-3 w-3 sm:h-4 sm:w-4 md:h-5 md:w-5 lg:h-6 lg:w-6" />
+                  <SkipForward className="h-4 w-4" />
                 </Button>
               </TooltipTrigger>
-              <TooltipContent>
-                <p>下一句</p>
+              <TooltipContent side="top">
+                <p>下一句 (→)</p>
               </TooltipContent>
             </Tooltip>
           </TooltipProvider>
         </div>
 
-        {/* 进度指示器 - 在小屏幕上显示在右侧 */}
-        <div className="text-[10px] sm:text-xs md:text-sm lg:text-base font-medium bg-gray-100 dark:bg-gray-800 px-1.5 sm:px-2 md:px-3 lg:px-4 py-0.5 sm:py-1 md:py-1.5 lg:py-2 rounded-full shrink-0 text-center md:order-3">
-          {totalCount > 0 ? `${currentIndex + 1} / ${totalCount}` : "0 / 0"}
-        </div>
+        {/* Right Section: Rate Popover & Voice info */}
+        <div className="flex items-center justify-end gap-2 shrink-0">
+          {/* Playback rate popover with quick buttons & slider */}
+          <Popover>
+            <PopoverTrigger asChild>
+              <Button
+                variant="outline"
+                size="sm"
+                className="h-8 gap-1.5 rounded-full px-2.5 text-xs font-semibold border-border/80 bg-background/80 hover:bg-accent shadow-sm"
+              >
+                <Gauge className="h-3.5 w-3.5 text-primary" />
+                <span>{playbackRate.toFixed(1)}x</span>
+              </Button>
+            </PopoverTrigger>
+            <PopoverContent side="top" align="end" className="w-64 p-3 space-y-3">
+              <div className="flex items-center justify-between text-xs font-medium text-foreground">
+                <span>朗读语速</span>
+                <span className="font-semibold text-primary">{playbackRate.toFixed(1)}x</span>
+              </div>
 
-        {/* 播放速率控制 - 在小屏幕上占据整行 */}
-        <div className="flex items-center gap-1 sm:gap-2 md:gap-3 lg:gap-4 flex-1 col-span-2 mt-1 md:mt-0 md:col-span-1 md:order-2 md:max-w-md">
-          <div className="flex items-center gap-1 sm:gap-2 md:gap-3 flex-1">
-            <Gauge className="h-3 w-3 sm:h-4 sm:w-4 md:h-5 md:w-5 text-blue-500 dark:text-blue-400 flex-shrink-0" />
-            <Slider 
-              value={[sliderValue]} 
-              min={5} 
-              max={20} 
-              step={1} 
-              className="flex-1 cursor-pointer md:h-2 lg:h-3"
-              onValueChange={handlePlaybackRateChange}
-            />
-            <span className="text-[10px] sm:text-xs md:text-sm lg:text-base font-medium w-8 sm:w-10 md:w-12 lg:w-14 text-right bg-gray-100 dark:bg-gray-800 px-1 sm:px-1.5 md:px-2 lg:px-3 py-0.5 md:py-1 lg:py-1.5 rounded-md">{playbackRate.toFixed(1)}x</span>
-          </div>
-        </div>
-      </div>
+              {/* Speed presets */}
+              <div className="flex items-center justify-between gap-1">
+                {SPEED_PRESETS.map((preset) => (
+                  <button
+                    key={preset}
+                    type="button"
+                    onClick={() => {
+                      setSliderValue(preset * 10)
+                      onPlaybackRateChange(preset)
+                    }}
+                    className={cn(
+                      "flex-1 py-1 rounded-md text-[11px] font-medium transition-colors",
+                      Math.abs(playbackRate - preset) < 0.05
+                        ? "bg-primary text-primary-foreground shadow-sm"
+                        : "bg-secondary text-secondary-foreground hover:bg-accent"
+                    )}
+                  >
+                    {preset}x
+                  </button>
+                ))}
+              </div>
 
-      <div>
-        <Slider
-          value={[seekValue]}
-          disabled={totalCount <= 1}
-          onValueChange={(value) => setSeekValue(value[0])}
-          onValueCommit={handleProgressCommit}
-          className="cursor-pointer h-1.5 md:h-2 lg:h-3"
-        />
-        
-        <div className="flex justify-between text-[10px] sm:text-xs md:text-sm text-muted-foreground mt-1 md:mt-2 lg:mt-3">
-          <span>进度: {Math.round(progressPercentage)}%</span>
-          <span>句子: {totalCount > 0 ? currentIndex + 1 : 0} / {totalCount}</span>
+              {/* Fine Slider */}
+              <div className="pt-1">
+                <Slider
+                  value={[sliderValue]}
+                  min={5}
+                  max={25}
+                  step={1}
+                  onValueChange={handleSpeedSliderChange}
+                  className="cursor-pointer"
+                />
+                <div className="flex justify-between text-[10px] text-muted-foreground mt-1.5">
+                  <span>0.5x 慢速</span>
+                  <span>1.0x 正常</span>
+                  <span>2.5x 极速</span>
+                </div>
+              </div>
+            </PopoverContent>
+          </Popover>
+
+          {/* Voice Indicator button (clicking triggers settings) */}
+          {voiceName && onOpenSettings && (
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={onOpenSettings}
+              className="h-8 gap-1.5 rounded-full px-2.5 text-xs text-muted-foreground hover:text-foreground hidden md:inline-flex"
+            >
+              <span className="h-2 w-2 rounded-full bg-emerald-500 animate-pulse" />
+              <span className="truncate max-w-[80px]">{voiceName}</span>
+            </Button>
+          )}
         </div>
       </div>
     </div>
-  );
-} 
+  )
+}
